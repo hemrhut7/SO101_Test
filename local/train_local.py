@@ -1,8 +1,9 @@
-"""Unified local training script for SO-101 (SmolVLA / FC MLP / CNN).
+"""Unified local training script for SO-101 (SmolVLA / ACT / FC MLP / CNN).
 
 Examples:
     python local/train_local.py --arch fc
     python local/train_local.py --arch cnn --batch-size 32 --steps 15000
+    python local/train_local.py --arch act --batch-size 16 --steps 15000
     python local/train_local.py --arch smolvla --batch-size 16 --steps 15000
 """
 
@@ -25,11 +26,11 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Local SO-101 training script (SmolVLA / FC / CNN)")
+    parser = argparse.ArgumentParser(description="Local SO-101 training script (SmolVLA / ACT / FC / CNN)")
     parser.add_argument(
         "--arch",
         required=True,
-        choices=["smolvla", "fc", "cnn"],
+        choices=["smolvla", "act", "fc", "cnn"],
         help="Model architecture to train.",
     )
     parser.add_argument(
@@ -49,15 +50,15 @@ def parse_args():
     )
     parser.add_argument("--chunk", type=int, default=50, help="Action chunk horizon.")
     parser.add_argument("--steps", type=int, default=15000, help="Total training steps.")
-    parser.add_argument("--batch-size", type=int, default=None, help="Batch size (default: 16 smolvla, 32 fc/cnn).")
-    parser.add_argument("--lr", type=float, default=None, help="Peak learning rate (default: 1e-4 smolvla, 3e-4 fc/cnn).")
+    parser.add_argument("--batch-size", type=int, default=None, help="Batch size (default: 16 smolvla/act, 32 fc/cnn).")
+    parser.add_argument("--lr", type=float, default=None, help="Peak learning rate (default: 1e-4 smolvla, 1e-5 act, 3e-4 fc/cnn).")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="Weight decay for fc/cnn.")
-    parser.add_argument("--warmup-steps", type=int, default=500, help="Warmup steps for fc/cnn.")
+    parser.add_argument("--warmup-steps", type=int, default=500, help="Warmup steps for act/fc/cnn.")
     parser.add_argument(
         "--grad-clip-norm",
         type=float,
         default=10.0,
-        help="Gradient clipping norm (for fc/cnn; smolvla uses SmolVLAConfig preset).",
+        help="Gradient clipping norm (for fc/cnn; smolvla/act use config preset).",
     )
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader worker processes.")
     parser.add_argument("--save-freq", type=int, default=500, help="Checkpoint save frequency (steps).")
@@ -174,7 +175,69 @@ def build_smolvla_components(args, ds, device, resume_dir):
     return policy, preprocess, postprocess, optimizer, scheduler, grad_clip_norm
 
 
+def build_act_components(args, ds, device, resume_dir):
+    import torch
+    from lerobot.configs.policies import PreTrainedConfig
+    from lerobot.policies.act.configuration_act import ACTConfig
+    from lerobot.policies.factory import make_policy, make_pre_post_processors
+
+    if resume_dir is not None:
+        print(f"--> Resuming ACT from checkpoint: {resume_dir}")
+        cfg = PreTrainedConfig.from_pretrained(resume_dir)
+        cfg.device = device
+        if hasattr(cfg, "chunk_size") and cfg.chunk_size != args.chunk:
+            raise ValueError(
+                f"Checkpoint chunk_size ({cfg.chunk_size}) 與 --chunk ({args.chunk}) 不一致，"
+                f"請調整 --chunk={cfg.chunk_size} 或使用 --no-resume。"
+            )
+        policy = make_policy(cfg, ds_meta=ds.meta)
+        preprocess, postprocess = make_pre_post_processors(
+            policy.config,
+            pretrained_path=resume_dir,
+            preprocessor_overrides={"device_processor": {"device": device}},
+        )
+    else:
+        print("--> Starting fresh ACT training (ResNet18 + Transformer CVAE)")
+        cfg = ACTConfig(
+            chunk_size=args.chunk,
+            n_action_steps=args.chunk,
+            device=device,
+        )
+        policy = make_policy(cfg, ds_meta=ds.meta)
+        preprocess, postprocess = make_pre_post_processors(
+            policy.config,
+            dataset_stats=ds.meta.stats,
+        )
+
+    lr = args.lr if args.lr is not None else 1e-5
+    opt_cfg = policy.config.get_optimizer_preset()
+    opt_cfg.lr = lr
+    if hasattr(policy.config, "optimizer_lr"):
+        policy.config.optimizer_lr = lr
+    if hasattr(policy.config, "optimizer_lr_backbone"):
+        policy.config.optimizer_lr_backbone = lr
+    grad_clip_norm = getattr(opt_cfg, "grad_clip_norm", args.grad_clip_norm)
+    optimizer = opt_cfg.build(policy.get_optim_params())
+
+    sched_cfg = policy.config.get_scheduler_preset()
+    if sched_cfg is not None:
+        if hasattr(sched_cfg, "peak_lr"):
+            sched_cfg.peak_lr = lr
+        scheduler = sched_cfg.build(optimizer, num_training_steps=args.steps)
+    else:
+        def lr_lambda(current_step):
+            if current_step < args.warmup_steps:
+                return float(current_step + 1) / float(max(1, args.warmup_steps))
+            progress = float(current_step - args.warmup_steps) / float(max(1, args.steps - args.warmup_steps))
+            return max(0.05, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    return policy, preprocess, postprocess, optimizer, scheduler, grad_clip_norm
+
+
 def build_custom_components(args, ds, device, resume_dir, load_custom_policy_from_checkpoint, FCActionPolicy, CNNActionPolicy):
+    import torch
+
     state_dim = int(ds.meta.shapes["observation.state"][0])
     action_dim = int(ds.meta.shapes["action"][0])
     camera_keys = list(ds.meta.camera_keys)
@@ -258,7 +321,7 @@ def save_checkpoint(
     state_payload = build_training_state_payload(current_step, optimizer, scheduler, losses)
 
     try:
-        if arch == "smolvla":
+        if arch in ("smolvla", "act"):
             policy.save_pretrained(staging_dir)
             preprocess.save_pretrained(staging_dir)
             postprocess.save_pretrained(staging_dir)
@@ -291,8 +354,8 @@ def save_checkpoint(
 
 def main():
     args = parse_args()
-    is_smolvla = args.arch == "smolvla"
-    batch_size = args.batch_size if args.batch_size is not None else (16 if is_smolvla else 32)
+    is_lerobot_policy = args.arch in ("smolvla", "act")
+    batch_size = args.batch_size if args.batch_size is not None else (16 if is_lerobot_policy else 32)
     validate_args(args, batch_size)
 
     # Set HF_HUB_OFFLINE before importing lerobot / huggingface_hub
@@ -329,7 +392,7 @@ def main():
     latest_dir = os.path.join(checkpoint_root, "latest")
     os.makedirs(checkpoint_root, exist_ok=True)
 
-    required_files = SMOVLA_REQUIRED_FILES if is_smolvla else CUSTOM_REQUIRED_FILES
+    required_files = SMOVLA_REQUIRED_FILES if is_lerobot_policy else CUSTOM_REQUIRED_FILES
     expected_arch = "fc_mlp" if args.arch == "fc" else ("cnn" if args.arch == "cnn" else None)
     milestone_prefix = f"{args.arch}_pick_step"
 
@@ -354,12 +417,16 @@ def main():
         resume_dir, resume_ckpt = find_latest_checkpoint(
             checkpoint_root,
             required_files,
-            check_processor_states=is_smolvla,
+            check_processor_states=is_lerobot_policy,
             expected_arch=expected_arch,
         )
 
-    if is_smolvla:
+    if args.arch == "smolvla":
         policy, preprocess, postprocess, optimizer, scheduler, grad_clip_norm = build_smolvla_components(
+            args, ds, device, resume_dir
+        )
+    elif args.arch == "act":
+        policy, preprocess, postprocess, optimizer, scheduler, grad_clip_norm = build_act_components(
             args, ds, device, resume_dir
         )
     else:
@@ -465,7 +532,7 @@ def main():
                         save_targets,
                         step,
                         required_files,
-                        is_smolvla,
+                        is_lerobot_policy,
                         expected_arch,
                         build_training_state_payload,
                         sync_dir_atomically,
@@ -489,7 +556,7 @@ def main():
                     [latest_dir],
                     last_completed_step,
                     required_files,
-                    is_smolvla,
+                    is_lerobot_policy,
                     expected_arch,
                     build_training_state_payload,
                     sync_dir_atomically,
@@ -513,7 +580,7 @@ def main():
                         [latest_dir],
                         last_completed_step,
                         required_files,
-                        is_smolvla,
+                        is_lerobot_policy,
                         expected_arch,
                         build_training_state_payload,
                         sync_dir_atomically,
@@ -524,7 +591,12 @@ def main():
                     print(f"\n[Error Recovery] Emergency save failed: {save_err}")
             raise
 
-    ylabel = "flow-matching loss" if is_smolvla else "masked MSE loss (normalized)"
+    if args.arch == "smolvla":
+        ylabel = "flow-matching loss"
+    elif args.arch == "act":
+        ylabel = "ACT loss (L1 + KL)"
+    else:
+        ylabel = "masked MSE loss (normalized)"
     save_loss_plot(
         losses,
         ylabel=ylabel,
@@ -535,12 +607,25 @@ def main():
     if interrupted:
         return
 
-    if not is_smolvla:
+    if not is_lerobot_policy:
         sample = ds[0]
         sample_batch = {k: (v.unsqueeze(0) if isinstance(v, torch.Tensor) else v) for k, v in sample.items()}
         pred_chunk = policy.predict_action(sample_batch)
         print("Sanity check - predicted action chunk shape:", tuple(pred_chunk.shape))
         print("Sanity check - first predicted step:", pred_chunk[0, 0].detach().cpu().numpy().round(3))
+    elif args.arch == "act":
+        policy.eval()
+        policy.reset()
+        sample = ds[0]
+        obs_batch = {
+            k: v.unsqueeze(0)
+            for k, v in sample.items()
+            if k.startswith("observation.") and isinstance(v, torch.Tensor)
+        }
+        with torch.no_grad():
+            pred_action = postprocess(policy.select_action(preprocess(obs_batch)))
+        print("Sanity check - predicted action shape:", tuple(pred_action.shape))
+        print("Sanity check - first predicted step:", pred_action.squeeze(0).detach().cpu().numpy().round(3))
 
     if completed:
         target_step = max(args.steps, start_step)
@@ -555,7 +640,7 @@ def main():
                 if verify_checkpoint_dir(
                     c,
                     required_files,
-                    check_processor_states=is_smolvla,
+                    check_processor_states=is_lerobot_policy,
                     expected_arch=expected_arch,
                 )
             ),
@@ -563,7 +648,7 @@ def main():
         )
         if verify_target is None:
             raise RuntimeError(f"最終檢查失敗，找不到完整模型檔案：{candidates[0]}")
-        weight_name = "model.safetensors" if is_smolvla else "model.pt"
+        weight_name = "model.safetensors" if is_lerobot_policy else "model.pt"
         weights_mb = os.path.getsize(os.path.join(verify_target, weight_name)) / (1024 * 1024)
         print(f"[Verified] 模型已完整儲存至：{verify_target} ({weight_name}: {weights_mb:.1f} MB)")
 

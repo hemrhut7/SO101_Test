@@ -15,19 +15,21 @@ import pandas as pd
 import torch
 
 
-SMOVLA_REQUIRED_FILES = (
-    "training_state.pt",
+DEPLOY_LEROBOT_REQUIRED_FILES = (
     "config.json",
     "model.safetensors",
     "policy_preprocessor.json",
     "policy_postprocessor.json",
 )
 
-CUSTOM_REQUIRED_FILES = (
-    "training_state.pt",
+SMOVLA_REQUIRED_FILES = ("training_state.pt",) + DEPLOY_LEROBOT_REQUIRED_FILES
+
+DEPLOY_CUSTOM_REQUIRED_FILES = (
     "config.json",
     "model.pt",
 )
+
+CUSTOM_REQUIRED_FILES = ("training_state.pt",) + DEPLOY_CUSTOM_REQUIRED_FILES
 
 
 def safe_sync():
@@ -70,8 +72,14 @@ def resolve_dataset_root(dataset_dir):
     )
 
 
-def verify_checkpoint_dir(ckpt_dir, required_files, check_processor_states=False, expected_arch=None):
-    """Verify required checkpoint files, optional processor states, and architecture match."""
+def verify_checkpoint_dir(
+    ckpt_dir,
+    required_files,
+    check_processor_states=False,
+    expected_arch=None,
+    expected_type=None,
+):
+    """Verify required checkpoint files, optional processor states, and architecture/type match."""
     if not os.path.isdir(ckpt_dir):
         return False
     for fname in required_files:
@@ -79,11 +87,13 @@ def verify_checkpoint_dir(ckpt_dir, required_files, check_processor_states=False
         if not os.path.isfile(fpath) or os.path.getsize(fpath) == 0:
             return False
 
-    if expected_arch is not None:
+    if expected_arch is not None or expected_type is not None:
         try:
             with open(os.path.join(ckpt_dir, "config.json"), "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-            if cfg.get("arch") != expected_arch:
+            if expected_arch is not None and cfg.get("arch") != expected_arch:
+                return False
+            if expected_type is not None and cfg.get("type") != expected_type:
                 return False
         except Exception:
             return False

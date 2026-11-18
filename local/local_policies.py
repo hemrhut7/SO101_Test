@@ -76,6 +76,8 @@ class BaseChunkActionPolicy(nn.Module):
             img = img.unsqueeze(0)
         elif img.ndim == 5:
             img = img[:, -1]
+        if img.ndim == 4 and img.shape[-1] in (1, 3, 4) and img.shape[1] not in (1, 3, 4):
+            img = img.permute(0, 3, 1, 2).contiguous()
         if is_uint8:
             img = img / 255.0
         img = F.interpolate(img, size=self.image_size, mode="bilinear", align_corners=False)

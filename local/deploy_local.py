@@ -1,16 +1,16 @@
-"""Local SO-101 deployment and inference script for SmolVLA, FC (MLP), and CNN.
+"""Local SO-101 deployment and inference script for SmolVLA, ACT, FC (MLP), and CNN.
 
 Examples:
     # 1. Offline dry-run (no robot hardware required)
-    python local/deploy_local.py --checkpoint ./outputs/cnn/checkpoints/latest --dry-run
+    python local/deploy_local.py --checkpoint ./outputs/act/checkpoints/latest --dry-run
 
     # 2. Live SO-101 robot deployment (Windows COM port)
     python local/deploy_local.py --checkpoint ./outputs/smolvla/checkpoints/latest ^
         --port COM5 --robot-id my_so101 --cam-top 0 --cam-front 1 ^
         --task "Pick up the stylus" --offline
 
-    # 3. Live SO-101 robot deployment with FC or CNN
-    python local/deploy_local.py --checkpoint ./outputs/cnn/checkpoints/latest ^
+    # 3. Live SO-101 robot deployment with ACT, FC, or CNN
+    python local/deploy_local.py --checkpoint ./outputs/act/checkpoints/latest ^
         --port COM5 --robot-id my_so101 --cam-top 0 --cam-front 1 --n-action-steps 15
 """
 
@@ -31,7 +31,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Deploy trained SmolVLA / FC / CNN policy on SO-101.")
+    parser = argparse.ArgumentParser(description="Deploy trained SmolVLA / ACT / FC / CNN policy on SO-101.")
     parser.add_argument(
         "--checkpoint",
         required=True,
@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument(
         "--arch",
         default="auto",
-        choices=["auto", "smolvla", "fc", "cnn"],
+        choices=["auto", "smolvla", "act", "fc", "cnn"],
         help="Model architecture (default: auto-detect from config.json).",
     )
     parser.add_argument("--task", default="Pick up the stylus", help="Language task instruction (for SmolVLA).")
@@ -100,6 +100,11 @@ def detect_arch(ckpt_dir, requested_arch):
         return "fc"
     if arch == "cnn":
         return "cnn"
+    cfg_type = cfg.get("type")
+    if cfg_type == "act":
+        return "act"
+    if cfg_type == "smolvla":
+        return "smolvla"
     if os.path.isfile(os.path.join(ckpt_dir, "model.safetensors")):
         return "smolvla"
     raise ValueError(f"無法從 {ckpt_dir} 自動辨識模型架構，請手動指定 --arch。")
@@ -111,7 +116,7 @@ def _parse_cam_source(val):
 
 
 class PolicyRunner:
-    """Unified runtime wrapper for SmolVLA, FC (MLP), and CNN action chunk inference."""
+    """Unified runtime wrapper for SmolVLA, ACT, FC (MLP), and CNN action chunk inference."""
 
     def __init__(self, arch, ckpt_dir, device, n_action_steps):
         self.arch = arch
@@ -122,12 +127,21 @@ class PolicyRunner:
         self.preprocess = None
         self.postprocess = None
 
-        if arch == "smolvla":
+        if arch in ("smolvla", "act"):
             from lerobot.policies.factory import make_pre_post_processors
-            from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 
-            self.policy = SmolVLAPolicy.from_pretrained(ckpt_dir).to(device).eval()
+            if arch == "smolvla":
+                from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+
+                self.policy = SmolVLAPolicy.from_pretrained(ckpt_dir).to(device).eval()
+            else:
+                from lerobot.policies.act.modeling_act import ACTPolicy
+
+                self.policy = ACTPolicy.from_pretrained(ckpt_dir).to(device).eval()
+
             if self.n_action_steps > 0 and hasattr(self.policy.config, "n_action_steps"):
+                if getattr(self.policy.config, "temporal_ensemble_coeff", None) is not None:
+                    print("Note: checkpoint uses temporal_ensemble_coeff; --n-action-steps queue override does not apply.")
                 max_chunk = getattr(self.policy.config, "chunk_size", self.n_action_steps)
                 self.policy.config.n_action_steps = min(self.n_action_steps, max_chunk)
             self.preprocess, self.postprocess = make_pre_post_processors(
@@ -148,6 +162,8 @@ class PolicyRunner:
             self.camera_keys = list(self.policy.camera_keys) if getattr(self.policy, "use_images", True) else []
             self.state_dim = self.policy.state_dim
 
+        self.reset()
+
     def reset(self):
         self.action_queue.clear()
         if hasattr(self.policy, "reset"):
@@ -156,7 +172,7 @@ class PolicyRunner:
     def select_action(self, obs_frame):
         import torch
 
-        if self.arch == "smolvla":
+        if self.arch in ("smolvla", "act"):
             processed = self.preprocess(obs_frame)
             with torch.no_grad():
                 action = self.policy.select_action(processed)
@@ -177,11 +193,10 @@ def run_dry_run(args, runner, device):
     dataset_samples = None
     ds = None
     try:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
         from local_utils import resolve_dataset_root
 
         ds_root = resolve_dataset_root(args.dataset_dir)
-        ds_meta = LeRobotDatasetMetadata(args.repo_id, root=ds_root)
         ds = LeRobotDataset(args.repo_id, root=ds_root, video_backend=args.video_backend)
         dataset_samples = min(args.max_steps, len(ds))
         print(f"[Dry-Run] Using dataset from {ds_root} ({dataset_samples} steps)")
@@ -217,7 +232,7 @@ def run_dry_run(args, runner, device):
 
         t0 = time.perf_counter()
         pred = runner.select_action(obs_frame)
-        if device == "cuda":
+        if str(device).startswith("cuda"):
             torch.cuda.synchronize()
         dt_ms = (time.perf_counter() - t0) * 1000.0
         latencies_ms.append(dt_ms)
@@ -244,9 +259,13 @@ def run_live_robot(args, runner, device):
 
     if not args.port:
         raise ValueError("實機部署必須提供 --port（例如 Windows: COM5，Linux: /dev/ttyACM0），或加上 --dry-run 進行離線測試。")
+    if args.no_cameras and runner.camera_keys:
+        raise ValueError(f"模型需要相機輸入 {runner.camera_keys}，不可搭配 --no-cameras。")
+    if args.fps < 1.0:
+        raise ValueError(f"實機部署搭配 OpenCV 相機時 --fps 須 >= 1.0，目前為 {args.fps}。")
 
     cameras = {}
-    if not args.no_cameras and runner.camera_keys:
+    if runner.camera_keys:
         cam_sources = {
             "top": _parse_cam_source(args.cam_top),
             "front": _parse_cam_source(args.cam_front),
@@ -273,17 +292,18 @@ def run_live_robot(args, runner, device):
     robot_cfg = SO101FollowerConfig(**robot_kwargs)
     robot = SO101Follower(robot_cfg)
 
-    print(f"Connecting SO-101 on {args.port} (id={args.robot_id}, cameras={list(cameras.keys())}) ...")
-    robot.connect(calibrate=args.calibrate)
-
-    action_features = hw_to_dataset_features(robot.action_features, "action")
-    obs_features = hw_to_dataset_features(robot.observation_features, "observation")
-    dataset_features = {**action_features, **obs_features}
-
     period_s = 1.0 / max(args.fps, 1e-6)
     torch_device = torch.device(device)
 
     try:
+        print(f"Connecting SO-101 on {args.port} (id={args.robot_id}, cameras={list(cameras.keys())}) ...")
+        robot.connect(calibrate=args.calibrate)
+
+        action_features = hw_to_dataset_features(robot.action_features, "action")
+        obs_features = hw_to_dataset_features(robot.observation_features, "observation")
+        dataset_features = {**action_features, **obs_features}
+        robot_type = getattr(robot, "robot_type", None)
+
         for ep in range(args.episodes):
             runner.reset()
             print(f"\n=== Episode {ep + 1}/{args.episodes} | task: '{args.task}' ===")
@@ -296,6 +316,7 @@ def run_live_robot(args, runner, device):
                     ds_features=dataset_features,
                     device=torch_device,
                     task=args.task,
+                    robot_type=robot_type,
                 )
                 action_tensor = runner.select_action(obs_frame)
                 robot_action = make_robot_action(action_tensor, dataset_features)
@@ -311,9 +332,13 @@ def run_live_robot(args, runner, device):
     except KeyboardInterrupt:
         print("\n[Stopped] Deployment interrupted by user (Ctrl+C).")
     finally:
-        print("Disconnecting SO-101 robot ...")
-        robot.disconnect()
-        print("Robot disconnected safely.")
+        if getattr(robot, "is_connected", True):
+            print("Disconnecting SO-101 robot ...")
+            try:
+                robot.disconnect()
+                print("Robot disconnected safely.")
+            except Exception as disc_err:
+                print(f"Warning: disconnect raised an error: {disc_err}")
 
 
 def main():
@@ -327,17 +352,19 @@ def main():
     ckpt_dir = str(Path(args.checkpoint).expanduser().resolve())
     arch = detect_arch(ckpt_dir, args.arch)
 
-    from local_utils import CUSTOM_REQUIRED_FILES, SMOVLA_REQUIRED_FILES, verify_checkpoint_dir
+    from local_utils import DEPLOY_CUSTOM_REQUIRED_FILES, DEPLOY_LEROBOT_REQUIRED_FILES, verify_checkpoint_dir
 
-    is_smolvla = arch == "smolvla"
-    required_files = SMOVLA_REQUIRED_FILES if is_smolvla else CUSTOM_REQUIRED_FILES
+    is_lerobot_policy = arch in ("smolvla", "act")
+    required_files = DEPLOY_LEROBOT_REQUIRED_FILES if is_lerobot_policy else DEPLOY_CUSTOM_REQUIRED_FILES
     expected_arch = "fc_mlp" if arch == "fc" else ("cnn" if arch == "cnn" else None)
+    expected_type = arch if is_lerobot_policy else None
 
     if not verify_checkpoint_dir(
         ckpt_dir,
         required_files,
-        check_processor_states=is_smolvla,
+        check_processor_states=is_lerobot_policy,
         expected_arch=expected_arch,
+        expected_type=expected_type,
     ):
         raise FileNotFoundError(f"Checkpoint 驗證失敗或不完整：{ckpt_dir}")
 
