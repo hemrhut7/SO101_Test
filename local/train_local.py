@@ -1,9 +1,9 @@
 """Unified local training script for SO-101 (SmolVLA / FC MLP / CNN).
 
 Examples:
-    python train_local.py --arch fc
-    python train_local.py --arch cnn --batch-size 32 --steps 15000
-    python train_local.py --arch smolvla --batch-size 16 --steps 15000
+    python local/train_local.py --arch fc
+    python local/train_local.py --arch cnn --batch-size 32 --steps 15000
+    python local/train_local.py --arch smolvla --batch-size 16 --steps 15000
 """
 
 import argparse
@@ -12,13 +12,16 @@ import json
 import math
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-
-PROJECT_ROOT = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+PROJECT_ROOT = SCRIPT_DIR.parent
 
 
 def parse_args():
