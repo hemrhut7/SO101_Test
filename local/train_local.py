@@ -64,9 +64,22 @@ def parse_args():
     parser.add_argument("--save-freq", type=int, default=500, help="Checkpoint save frequency (steps).")
     parser.add_argument("--milestone-freq", type=int, default=5000, help="Milestone checkpoint frequency (steps).")
     parser.add_argument("--no-resume", action="store_true", help="Ignore existing checkpoints and start fresh.")
-    parser.add_argument("--no-trim", action="store_true", help="Disable idle-prefix frame trimming.")
+    parser.add_argument("--no-trim", action="store_true", help="Disable head/tail idle frame trimming.")
+    parser.add_argument("--no-trim-tail", action="store_true", help="Disable trailing idle frame trimming only.")
     parser.add_argument("--move-thresh", type=float, default=3.0, help="State delta threshold for idle trimming.")
     parser.add_argument("--keep-lead-frames", type=int, default=10, help="Frames to keep before first movement.")
+    parser.add_argument("--keep-tail-frames", type=int, default=10, help="Frames to keep after last movement.")
+    parser.add_argument(
+        "--drop-longest-episodes",
+        type=int,
+        default=10,
+        help="Exclude the N longest-duration episodes (default: 10, set 0 to disable).",
+    )
+    parser.add_argument(
+        "--exclude-episodes",
+        default="",
+        help="Comma-separated episode indices to exclude manually (e.g., 3,12).",
+    )
     parser.add_argument("--video-backend", default="pyav", help="LeRobot video decoding backend.")
 
     # SmolVLA options
@@ -98,6 +111,8 @@ def validate_args(args, batch_size):
             raise ValueError(f"{name} 必須為正整數，目前為 {val}。")
     if args.num_workers < 0:
         raise ValueError(f"--num-workers 不可為負數，目前為 {args.num_workers}。")
+    if args.drop_longest_episodes < 0 or args.keep_lead_frames < 0 or args.keep_tail_frames < 0:
+        raise ValueError("--drop-longest-episodes、--keep-lead-frames 與 --keep-tail-frames 不可為負數。")
     if args.fc_image_size <= 0 or args.cnn_image_size <= 0:
         raise ValueError("--fc-image-size 與 --cnn-image-size 必須為正整數。")
 
@@ -460,10 +475,28 @@ def main():
         print(f"Training already completed ({start_step}/{args.steps} steps). Skipping loop.")
         completed = True
     else:
+        manual_excludes = [
+            int(x.strip()) for x in args.exclude_episodes.split(",") if x.strip()
+        ]
+        use_filter = (
+            (not args.no_trim)
+            or args.drop_longest_episodes > 0
+            or bool(manual_excludes)
+        )
         train_ds = (
-            ds
-            if args.no_trim
-            else build_trimmed_subset(ds, ds_root, move_thresh=args.move_thresh, keep_lead_frames=args.keep_lead_frames)
+            build_trimmed_subset(
+                ds,
+                ds_root,
+                move_thresh=args.move_thresh,
+                keep_lead_frames=args.keep_lead_frames,
+                keep_tail_frames=args.keep_tail_frames,
+                trim_head=not args.no_trim,
+                trim_tail=(not args.no_trim and not args.no_trim_tail),
+                drop_longest_n=args.drop_longest_episodes,
+                exclude_episodes=manual_excludes,
+            )
+            if use_filter
+            else ds
         )
         if len(train_ds) < batch_size:
             raise ValueError(

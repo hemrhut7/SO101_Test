@@ -243,8 +243,18 @@ def restore_rng_state(rng_state):
         torch.cuda.set_rng_state_all(rng_state["cuda"])
 
 
-def build_trimmed_subset(dataset, ds_root, move_thresh=3.0, keep_lead_frames=10):
-    """Trim leading idle frames per episode so the policy does not overfit stationary starts."""
+def build_trimmed_subset(
+    dataset,
+    ds_root,
+    move_thresh=3.0,
+    keep_lead_frames=10,
+    keep_tail_frames=10,
+    trim_head=True,
+    trim_tail=True,
+    drop_longest_n=10,
+    exclude_episodes=None,
+):
+    """Filter out longest/excluded episodes and trim idle head/tail frames per episode."""
     files = sorted(Path(ds_root).glob("data/*/*.parquet"))
     if not files:
         raise FileNotFoundError(f"在 {ds_root}/data/*/*.parquet 找不到任何 parquet 資料檔。")
@@ -256,21 +266,94 @@ def build_trimmed_subset(dataset, ds_root, move_thresh=3.0, keep_lead_frames=10)
     states = np.stack(df["observation.state"].values)
     eps = df["episode_index"].values
     indices = df["index"].values
+    timestamps = df["timestamp"].values if "timestamp" in df.columns else None
+
+    unique_eps = np.unique(eps)
+    ep_masks = {int(ep): (eps == ep) for ep in unique_eps}
+
+    excluded_set = {int(e) for e in (exclude_episodes or ())}
+    remaining_eps = [int(ep) for ep in unique_eps if int(ep) not in excluded_set]
+
+    longest_dropped = []
+    if drop_longest_n > 0:
+        if len(remaining_eps) <= drop_longest_n:
+            raise ValueError(
+                f"可用 episode 數 ({len(remaining_eps)}) 不足，無法排除最長的 {drop_longest_n} 筆。"
+            )
+        ep_durations = []
+        for ep in remaining_eps:
+            m = ep_masks[ep]
+            n_frames = int(np.sum(m))
+            if timestamps is not None and n_frames > 1:
+                t_start = float(np.asarray(timestamps[m][0]).item())
+                t_end = float(np.asarray(timestamps[m][-1]).item())
+                dur = t_end - t_start
+            else:
+                dur = float(n_frames)
+            ep_durations.append((dur, n_frames, ep))
+        ep_durations.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+        for dur, n_frames, ep in ep_durations[:drop_longest_n]:
+            excluded_set.add(ep)
+            longest_dropped.append((ep, n_frames, dur))
 
     valid_indices = []
-    for ep in np.unique(eps):
-        m = eps == ep
-        ep_states = states[m]
+    dropped_ep_frames = 0
+    trimmed_head_frames = 0
+    trimmed_tail_frames = 0
+
+    for ep in unique_eps:
+        ep_int = int(ep)
+        m = ep_masks[ep_int]
         ep_idx = indices[m]
-        diffs = np.max(np.abs(ep_states - ep_states[0]), axis=1)
-        moved = np.where(diffs > move_thresh)[0]
-        start_offset = max(0, int(moved[0]) - keep_lead_frames) if len(moved) > 0 else 0
-        valid_indices.extend(ep_idx[start_offset:].tolist())
+        if ep_int in excluded_set:
+            dropped_ep_frames += len(ep_idx)
+            continue
+
+        ep_states = states[m]
+        n_ep = len(ep_states)
+
+        if trim_head:
+            head_diffs = np.max(np.abs(ep_states - ep_states[0]), axis=1)
+            head_moved = np.where(head_diffs > move_thresh)[0]
+            start_offset = max(0, int(head_moved[0]) - keep_lead_frames) if len(head_moved) > 0 else 0
+        else:
+            start_offset = 0
+
+        if trim_tail:
+            tail_diffs = np.max(np.abs(ep_states - ep_states[-1]), axis=1)
+            tail_moved = np.where(tail_diffs > move_thresh)[0]
+            end_offset = (
+                min(n_ep, int(tail_moved[-1]) + 1 + keep_tail_frames)
+                if len(tail_moved) > 0
+                else n_ep
+            )
+        else:
+            end_offset = n_ep
+
+        if end_offset <= start_offset:
+            start_offset = 0
+            end_offset = n_ep
+
+        trimmed_head_frames += start_offset
+        trimmed_tail_frames += n_ep - end_offset
+        valid_indices.extend(ep_idx[start_offset:end_offset].tolist())
+
+    if longest_dropped:
+        dropped_desc = ", ".join(
+            f"ep{ep}({n}f/{dur:.1f}s)" if timestamps is not None else f"ep{ep}({n}f)"
+            for ep, n, dur in longest_dropped
+        )
+        print(f"Excluded longest {len(longest_dropped)} episodes: {dropped_desc}")
+    if len(excluded_set) > len(longest_dropped):
+        manual_eps = sorted(excluded_set - {ep for ep, _, _ in longest_dropped})
+        print(f"Excluded manual episodes: {manual_eps}")
 
     removed = len(df) - len(valid_indices)
     print(
-        f"Trimmed idle prefix: {len(df)} -> {len(valid_indices)} frames "
-        f"(removed {removed}, {removed / len(df) * 100:.1f}%)"
+        f"Dataset filter summary: {len(df)} -> {len(valid_indices)} frames "
+        f"(kept {len(valid_indices) / len(df) * 100:.1f}% | "
+        f"dropped_eps={dropped_ep_frames}, trimmed_head={trimmed_head_frames}, "
+        f"trimmed_tail={trimmed_tail_frames}, total_removed={removed})"
     )
     return torch.utils.data.Subset(dataset, valid_indices)
 
