@@ -148,6 +148,7 @@ def build_smolvla_components(args, ds, device, resume_dir):
     if resume_dir is not None:
         print(f"--> Resuming SmolVLA from checkpoint: {resume_dir}")
         cfg = PreTrainedConfig.from_pretrained(resume_dir)
+        cfg.pretrained_path = resume_dir
         cfg.device = device
         if hasattr(cfg, "chunk_size") and cfg.chunk_size != args.chunk:
             raise ValueError(
@@ -214,6 +215,7 @@ def build_act_components(args, ds, device, resume_dir):
     if resume_dir is not None:
         print(f"--> Resuming ACT from checkpoint: {resume_dir}")
         cfg = PreTrainedConfig.from_pretrained(resume_dir)
+        cfg.pretrained_path = resume_dir
         cfg.device = device
         if hasattr(cfg, "chunk_size") and cfg.chunk_size != args.chunk:
             raise ValueError(
