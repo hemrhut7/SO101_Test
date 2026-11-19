@@ -22,7 +22,7 @@ SO101_Test/
 │   ├── local_policies.py
 │   └── local_utils.py
 ├── datasets/             # LeRobot v3.0 資料集（例如 so101_pick_stylus）
-└── output/               # Colab 下載回來的 checkpoint（本機訓練預設輸出至 outputs/）
+└── outputs/              # 訓練輸出目錄（outputs/<arch>/checkpoints）
 ```
 
 ---
@@ -63,7 +63,7 @@ uv remove <套件名稱>
 ### 本機離線 Dry-Run 測試（不需連接實體手臂）
 ```bash
 uv run python -u local/deploy_local.py \
-    --checkpoint ./output/checkpoints/latest \
+    --checkpoint ./outputs/smolvla/checkpoints/latest \
     --dataset-dir ./datasets/so101_pick_stylus \
     --dry-run --offline
 ```
@@ -71,7 +71,7 @@ uv run python -u local/deploy_local.py \
 ### SO-101 實機部署
 ```bash
 uv run python -u local/deploy_local.py \
-    --checkpoint ./output/checkpoints/latest \
+    --checkpoint ./outputs/smolvla/checkpoints/latest \
     --port /dev/ttyACM0 \
     --robot-id my_so101 \
     --cam-top 0 \
