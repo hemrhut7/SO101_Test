@@ -4,6 +4,7 @@ import json
 import os
 import random
 import shutil
+import struct
 import time
 from pathlib import Path
 
@@ -135,7 +136,33 @@ def recover_atomic_checkpoints(checkpoint_root):
                 shutil.rmtree(old_dir, ignore_errors=True)
 
 
-def find_latest_checkpoint(checkpoint_root, required_files, check_processor_states=False, expected_arch=None):
+def is_legacy_bf16_smolvla_checkpoint(ckpt_dir):
+    """Return True if ckpt_dir is a SmolVLA checkpoint whose trainable lm_expert norm/weights are BF16."""
+    cfg_path = os.path.join(ckpt_dir, "config.json")
+    weights_path = os.path.join(ckpt_dir, "model.safetensors")
+    if not os.path.isfile(cfg_path) or not os.path.isfile(weights_path):
+        return False
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        if cfg.get("type") != "smolvla":
+            return False
+        with open(weights_path, "rb") as f:
+            header_len = struct.unpack("<Q", f.read(8))[0]
+            header = json.loads(f.read(header_len).decode("utf-8"))
+        norm_meta = header.get("model.vlm_with_expert.lm_expert.norm.weight")
+        return bool(norm_meta and norm_meta.get("dtype") == "BF16")
+    except Exception:
+        return False
+
+
+def find_latest_checkpoint(
+    checkpoint_root,
+    required_files,
+    check_processor_states=False,
+    expected_arch=None,
+    skip_legacy_bf16_smolvla=True,
+):
     """Return (checkpoint_dir, training_state_dict) with the highest completed step."""
     best_dir, best_ckpt, best_step = None, None, -1
     if not os.path.isdir(checkpoint_root):
@@ -150,6 +177,12 @@ def find_latest_checkpoint(checkpoint_root, required_files, check_processor_stat
             check_processor_states=check_processor_states,
             expected_arch=expected_arch,
         ):
+            continue
+        if skip_legacy_bf16_smolvla and is_legacy_bf16_smolvla_checkpoint(cand_dir):
+            print(
+                f"Warning: skipping legacy BF16-underflow SmolVLA checkpoint {cand_dir} "
+                "(requires fresh FP32-master fine-tuning)."
+            )
             continue
         try:
             ckpt = torch.load(

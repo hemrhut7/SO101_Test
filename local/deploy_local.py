@@ -16,6 +16,7 @@ Examples:
 
 import argparse
 from collections import deque
+import inspect
 import json
 import os
 import sys
@@ -43,15 +44,25 @@ def parse_args():
         choices=["auto", "smolvla", "act", "fc", "cnn"],
         help="Model architecture (default: auto-detect from config.json).",
     )
-    parser.add_argument("--task", default="Pick up the stylus", help="Language task instruction (for SmolVLA).")
+    parser.add_argument(
+        "--task",
+        default="Pick up the stylus from the stand",
+        help="Language task instruction (for SmolVLA).",
+    )
     parser.add_argument("--fps", type=float, default=30.0, help="Control loop frequency in Hz.")
     parser.add_argument("--episodes", type=int, default=1, help="Number of deployment episodes.")
     parser.add_argument("--max-steps", type=int, default=300, help="Maximum steps per episode.")
     parser.add_argument(
         "--n-action-steps",
         type=int,
-        default=15,
-        help="Action chunk steps to execute per forward pass (for FC/CNN; optionally overrides SmolVLA).",
+        default=None,
+        help="Action chunk steps to execute per forward pass (default: 35 for SmolVLA/ACT, 15 for FC/CNN).",
+    )
+    parser.add_argument(
+        "--action-ema",
+        type=float,
+        default=1.0,
+        help="EMA smoothing factor in (0, 1] for consecutive actions (1.0 = no smoothing; e.g. 0.5 smooths jitter).",
     )
     parser.add_argument("--offline", action="store_true", help="Set HF_HUB_OFFLINE=1 before Hub imports.")
 
@@ -59,6 +70,11 @@ def parse_args():
     parser.add_argument("--port", default=None, help="Serial port for SO-101 follower (e.g., COM5 or /dev/ttyACM0).")
     parser.add_argument("--robot-id", default="so101_follower", help="Robot ID for calibration file lookup.")
     parser.add_argument("--calibrate", action="store_true", help="Run/verify calibration when connecting robot.")
+    parser.add_argument(
+        "--no-use-degrees",
+        action="store_true",
+        help="Disable use_degrees=True in SO101FollowerConfig (not recommended for datasets recorded in degrees).",
+    )
     parser.add_argument(
         "--max-relative-target",
         type=float,
@@ -118,11 +134,13 @@ def _parse_cam_source(val):
 class PolicyRunner:
     """Unified runtime wrapper for SmolVLA, ACT, FC (MLP), and CNN action chunk inference."""
 
-    def __init__(self, arch, ckpt_dir, device, n_action_steps):
+    def __init__(self, arch, ckpt_dir, device, n_action_steps, action_ema=1.0):
         self.arch = arch
         self.ckpt_dir = ckpt_dir
         self.device = device
-        self.n_action_steps = int(n_action_steps)
+        self.n_action_steps = int(n_action_steps) if n_action_steps is not None else (35 if arch in ("smolvla", "act") else 15)
+        self.action_ema = float(action_ema)
+        self._prev_action = None
         self.action_queue = deque()
         self.preprocess = None
         self.postprocess = None
@@ -132,7 +150,14 @@ class PolicyRunner:
 
             if arch == "smolvla":
                 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+                from local_utils import is_legacy_bf16_smolvla_checkpoint
 
+                if is_legacy_bf16_smolvla_checkpoint(ckpt_dir):
+                    print(
+                        "[WARNING] 此 SmolVLA checkpoint 的 lm_expert 權重為舊版 BF16"
+                        "（受梯度捨入消失影響，33 個 LayerNorm 未更新），實機部署可能出現上下抽搐！"
+                        "建議使用修正後的腳本重新訓練。"
+                    )
                 self.policy = SmolVLAPolicy.from_pretrained(ckpt_dir).to(device).eval()
             else:
                 from lerobot.policies.act.modeling_act import ACTPolicy
@@ -166,6 +191,7 @@ class PolicyRunner:
 
     def reset(self):
         self.action_queue.clear()
+        self._prev_action = None
         if hasattr(self.policy, "reset"):
             self.policy.reset()
 
@@ -177,13 +203,18 @@ class PolicyRunner:
             with torch.no_grad():
                 action = self.policy.select_action(processed)
                 action = self.postprocess(action)
-            return action
+        else:
+            if not self.action_queue:
+                chunk = self.policy.predict_action(obs_frame)  # (1, CHUNK, action_dim)
+                for i in range(self.n_action_steps):
+                    self.action_queue.append(chunk[:, i])
+            action = self.action_queue.popleft()
 
-        if not self.action_queue:
-            chunk = self.policy.predict_action(obs_frame)  # (1, CHUNK, action_dim)
-            for i in range(self.n_action_steps):
-                self.action_queue.append(chunk[:, i])
-        return self.action_queue.popleft()
+        if 0.0 < self.action_ema < 1.0:
+            if self._prev_action is not None:
+                action = self.action_ema * action + (1.0 - self.action_ema) * self._prev_action
+            self._prev_action = action.detach().clone()
+        return action
 
 
 def run_dry_run(args, runner, device):
@@ -286,6 +317,8 @@ def run_live_robot(args, runner, device):
         "id": args.robot_id,
         "cameras": cameras,
     }
+    if "use_degrees" in inspect.signature(SO101FollowerConfig).parameters:
+        robot_kwargs["use_degrees"] = not args.no_use_degrees
     if args.max_relative_target is not None:
         robot_kwargs["max_relative_target"] = args.max_relative_target
 
@@ -343,8 +376,12 @@ def run_live_robot(args, runner, device):
 
 def main():
     args = parse_args()
-    if args.fps <= 0 or args.episodes <= 0 or args.max_steps <= 0 or args.n_action_steps <= 0:
+    if args.fps <= 0 or args.episodes <= 0 or args.max_steps <= 0 or (
+        args.n_action_steps is not None and args.n_action_steps <= 0
+    ):
         raise ValueError("--fps、--episodes、--max-steps 與 --n-action-steps 必須皆為正數。")
+    if not (0.0 < args.action_ema <= 1.0):
+        raise ValueError("--action-ema 必須介於 (0.0, 1.0] 之間。")
 
     if args.offline:
         os.environ["HF_HUB_OFFLINE"] = "1"
@@ -372,7 +409,7 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading {arch.upper()} checkpoint from {ckpt_dir} on {device} ...")
-    runner = PolicyRunner(arch, ckpt_dir, device, args.n_action_steps)
+    runner = PolicyRunner(arch, ckpt_dir, device, args.n_action_steps, action_ema=args.action_ema)
     print(f"Model ready | cameras={runner.camera_keys} | state_dim={runner.state_dim}")
 
     if args.dry_run:

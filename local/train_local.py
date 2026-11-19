@@ -117,6 +117,19 @@ def validate_args(args, batch_size):
         raise ValueError("--fc-image-size 與 --cnn-image-size 必須為正整數。")
 
 
+def promote_trainable_params_to_fp32(policy):
+    """Cast all trainable (requires_grad) parameters to FP32 so AdamW does not suffer BF16 rounding erasure."""
+    import torch
+
+    promoted = 0
+    for p in policy.parameters():
+        if p.requires_grad and p.dtype != torch.float32:
+            p.data = p.data.float()
+            promoted += 1
+    trainable_dtypes = {str(p.dtype) for p in policy.parameters() if p.requires_grad}
+    print(f"Trainable parameter dtypes: {trainable_dtypes} (promoted {promoted} tensors from low precision to float32)")
+
+
 def build_smolvla_components(args, ds, device, resume_dir):
     import huggingface_hub.constants as hf_constants
     from huggingface_hub import snapshot_download
@@ -177,6 +190,8 @@ def build_smolvla_components(args, ds, device, resume_dir):
                 },
             },
         )
+
+    promote_trainable_params_to_fp32(policy)
 
     lr = args.lr if args.lr is not None else 1e-4
     opt_cfg = policy.config.get_optimizer_preset()
@@ -463,6 +478,11 @@ def main():
         start_step = int(resume_ckpt["step"])
         losses = list(resume_ckpt.get("losses", []))
         optimizer.load_state_dict(resume_ckpt["optimizer"])
+        for p in policy.parameters():
+            if p in optimizer.state:
+                for k, v in optimizer.state[p].items():
+                    if isinstance(v, torch.Tensor) and v.is_floating_point() and k != "step" and v.dtype != p.dtype:
+                        optimizer.state[p][k] = v.to(dtype=p.dtype)
         scheduler.load_state_dict(resume_ckpt["scheduler"])
         restore_rng_state(resume_ckpt.get("rng_state"))
         print(f"Restored training state at step {start_step}/{args.steps} (loaded {len(losses)} loss records)")
@@ -646,7 +666,7 @@ def main():
         pred_chunk = policy.predict_action(sample_batch)
         print("Sanity check - predicted action chunk shape:", tuple(pred_chunk.shape))
         print("Sanity check - first predicted step:", pred_chunk[0, 0].detach().cpu().numpy().round(3))
-    elif args.arch == "act":
+    elif args.arch in ("act", "smolvla"):
         policy.eval()
         policy.reset()
         sample = ds[0]
@@ -655,6 +675,8 @@ def main():
             for k, v in sample.items()
             if k.startswith("observation.") and isinstance(v, torch.Tensor)
         }
+        if args.arch == "smolvla":
+            obs_batch["task"] = sample.get("task", "Pick up the stylus from the stand")
         with torch.no_grad():
             pred_action = postprocess(policy.select_action(preprocess(obs_batch)))
         print("Sanity check - predicted action shape:", tuple(pred_action.shape))
