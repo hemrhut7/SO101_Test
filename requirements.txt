@@ -1,0 +1,18 @@
+# Core framework (Dataset v3.0, SmolVLA, ACT, SO-101 Feetech robot support)
+lerobot[smolvla,dataset,feetech]>=0.4.0
+
+# Deep learning (if using CUDA GPU, install PyTorch with your CUDA index-url first)
+torch
+torchvision
+
+# Data processing & visualization
+numpy
+pandas
+matplotlib
+
+# Video decoding (pyav backend) & OpenCV cameras
+av
+opencv-python
+
+# Hugging Face Hub (model/dataset download)
+huggingface_hub
