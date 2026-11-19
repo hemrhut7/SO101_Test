@@ -1,0 +1,16 @@
+[project]
+name = "so101-test"
+version = "0.1.0"
+description = "SO-101 robot arm training and deployment with SmolVLA, ACT, CNN, and FC policies."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "lerobot[smolvla,dataset,feetech]==0.7.0",
+    "torch",
+    "torchvision",
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "av",
+    "opencv-python",
+    "huggingface-hub",
+]
