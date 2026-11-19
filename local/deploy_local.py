@@ -55,7 +55,7 @@ def parse_args():
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=300,
+        default=600,
         help="Maximum steps per episode (<= 0 allowed when --duration > 0).",
     )
     parser.add_argument(
@@ -87,8 +87,8 @@ def parse_args():
     parser.add_argument("--offline", action="store_true", help="Set HF_HUB_OFFLINE=1 before Hub imports.")
 
     # Robot hardware options
-    parser.add_argument("--port", default=None, help="Serial port for SO-101 follower (e.g., COM5 or /dev/ttyACM0).")
-    parser.add_argument("--robot-id", default="so101_follower", help="Robot ID for calibration file lookup.")
+    parser.add_argument("--port", default="/dev/ttyACM0", help="Serial port for SO-101 follower (e.g., COM5 or /dev/ttyACM0).")
+    parser.add_argument("--robot-id", default="my_follower", help="Robot ID for calibration file lookup.")
     parser.add_argument("--calibrate", action="store_true", help="Run/verify calibration when connecting robot.")
     parser.add_argument(
         "--no-use-degrees",
@@ -102,7 +102,7 @@ def parse_args():
         help="Optional safety clamp on per-step joint angle delta.",
     )
     parser.add_argument("--cam-top", default="0", help="OpenCV index or device path for top camera.")
-    parser.add_argument("--cam-front", default="1", help="OpenCV index or device path for front camera.")
+    parser.add_argument("--cam-front", default="2", help="OpenCV index or device path for front camera.")
     parser.add_argument("--cam-width", type=int, default=640, help="Camera frame width.")
     parser.add_argument("--cam-height", type=int, default=480, help="Camera frame height.")
     parser.add_argument(
