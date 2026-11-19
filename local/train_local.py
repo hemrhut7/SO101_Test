@@ -60,7 +60,7 @@ def parse_args():
         default=10.0,
         help="Gradient clipping norm (for fc/cnn; smolvla/act use config preset).",
     )
-    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader worker processes.")
+    parser.add_argument("--num-workers", type=int, default=4, help="DataLoader worker processes.")
     parser.add_argument("--save-freq", type=int, default=500, help="Checkpoint save frequency (steps).")
     parser.add_argument("--milestone-freq", type=int, default=5000, help="Milestone checkpoint frequency (steps).")
     parser.add_argument("--no-resume", action="store_true", help="Ignore existing checkpoints and start fresh.")

@@ -16,6 +16,7 @@ Examples:
 
 import argparse
 from collections import deque
+import contextlib
 import inspect
 import json
 import os
@@ -51,18 +52,37 @@ def parse_args():
     )
     parser.add_argument("--fps", type=float, default=30.0, help="Control loop frequency in Hz.")
     parser.add_argument("--episodes", type=int, default=1, help="Number of deployment episodes.")
-    parser.add_argument("--max-steps", type=int, default=300, help="Maximum steps per episode.")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=300,
+        help="Maximum steps per episode (<= 0 allowed when --duration > 0).",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=0.0,
+        help="Optional total rollout duration limit in seconds (<= 0 disables time limit).",
+    )
     parser.add_argument(
         "--n-action-steps",
         type=int,
         default=None,
-        help="Action chunk steps to execute per forward pass (default: 35 for SmolVLA/ACT, 15 for FC/CNN).",
+        help="Action chunk steps per forward pass (default: 35 for SmolVLA/ACT, 15 for FC/CNN; <= 0 keeps checkpoint default).",
     )
     parser.add_argument(
         "--action-ema",
+        "--ema",
+        dest="action_ema",
         type=float,
         default=1.0,
-        help="EMA smoothing factor in (0, 1] for consecutive actions (1.0 = no smoothing; e.g. 0.5 smooths jitter).",
+        help="EMA smoothing factor in (0, 1] for consecutive actions (1.0 = no smoothing; e.g. 0.4 or 0.5 smooths jitter).",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Torch device ('cuda' or 'cpu'); defaults to auto-detect.",
     )
     parser.add_argument("--offline", action="store_true", help="Set HF_HUB_OFFLINE=1 before Hub imports.")
 
@@ -85,7 +105,18 @@ def parse_args():
     parser.add_argument("--cam-front", default="1", help="OpenCV index or device path for front camera.")
     parser.add_argument("--cam-width", type=int, default=640, help="Camera frame width.")
     parser.add_argument("--cam-height", type=int, default=480, help="Camera frame height.")
+    parser.add_argument(
+        "--fourcc",
+        type=str,
+        default="MJPG",
+        help="OpenCV FOURCC format (e.g. MJPG); pass empty string to auto-detect.",
+    )
     parser.add_argument("--no-cameras", action="store_true", help="Disable cameras (for state-only FC policy).")
+    parser.add_argument(
+        "--display",
+        action="store_true",
+        help="Show live camera preview window during live deployment (press 'q' to stop).",
+    )
 
     # Dry-run options
     parser.add_argument(
@@ -183,7 +214,8 @@ class PolicyRunner:
 
             self.policy = load_custom_policy_from_checkpoint(ckpt_dir, device)
             self.policy.eval()
-            self.n_action_steps = max(1, min(self.n_action_steps, self.policy.chunk_size))
+            effective_steps = self.n_action_steps if self.n_action_steps > 0 else self.policy.chunk_size
+            self.n_action_steps = max(1, min(effective_steps, self.policy.chunk_size))
             self.camera_keys = list(self.policy.camera_keys) if getattr(self.policy, "use_images", True) else []
             self.state_dim = self.policy.state_dim
 
@@ -200,7 +232,7 @@ class PolicyRunner:
 
         if self.arch in ("smolvla", "act"):
             processed = self.preprocess(obs_frame)
-            with torch.no_grad():
+            with torch.inference_mode():
                 action = self.policy.select_action(processed)
                 action = self.postprocess(action)
         else:
@@ -282,11 +314,13 @@ def run_dry_run(args, runner, device):
 
 
 def run_live_robot(args, runner, device):
+    import numpy as np
     import torch
     from lerobot.cameras.opencv import OpenCVCameraConfig
     from lerobot.policies.utils import build_inference_frame, make_robot_action
     from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
     from lerobot.utils.feature_utils import hw_to_dataset_features
+    from lerobot.utils.robot_utils import precise_sleep
 
     if not args.port:
         raise ValueError("實機部署必須提供 --port（例如 Windows: COM5，Linux: /dev/ttyACM0），或加上 --dry-run 進行離線測試。")
@@ -295,6 +329,7 @@ def run_live_robot(args, runner, device):
     if args.fps < 1.0:
         raise ValueError(f"實機部署搭配 OpenCV 相機時 --fps 須 >= 1.0，目前為 {args.fps}。")
 
+    fourcc = args.fourcc if args.fourcc else None
     cameras = {}
     if runner.camera_keys:
         cam_sources = {
@@ -310,6 +345,7 @@ def run_live_robot(args, runner, device):
                 width=args.cam_width,
                 height=args.cam_height,
                 fps=int(args.fps),
+                fourcc=fourcc,
             )
 
     robot_kwargs = {
@@ -325,8 +361,17 @@ def run_live_robot(args, runner, device):
     robot_cfg = SO101FollowerConfig(**robot_kwargs)
     robot = SO101Follower(robot_cfg)
 
+    cv2 = None
+    if args.display and cameras:
+        import cv2 as _cv2
+
+        cv2 = _cv2
+    elif args.display and not cameras:
+        print("Note: --display ignored because no cameras are active.")
+
     period_s = 1.0 / max(args.fps, 1e-6)
     torch_device = torch.device(device)
+    log_interval = max(1, int(args.fps))
 
     try:
         print(f"Connecting SO-101 on {args.port} (id={args.robot_id}, cameras={list(cameras.keys())}) ...")
@@ -337,10 +382,22 @@ def run_live_robot(args, runner, device):
         dataset_features = {**action_features, **obs_features}
         robot_type = getattr(robot, "robot_type", None)
 
+        rollout_start = time.perf_counter()
+        stop_requested = False
+
         for ep in range(args.episodes):
             runner.reset()
-            print(f"\n=== Episode {ep + 1}/{args.episodes} | task: '{args.task}' ===")
-            for step in range(args.max_steps):
+            print(
+                f"\n=== Episode {ep + 1}/{args.episodes} | task: '{args.task}' "
+                f"| fps={args.fps} | action_ema={args.action_ema} ==="
+            )
+            step = 0
+            while args.max_steps <= 0 or step < args.max_steps:
+                if args.duration > 0 and (time.perf_counter() - rollout_start) >= args.duration:
+                    print(f"Reached duration limit ({args.duration:.1f}s). Stopping.")
+                    stop_requested = True
+                    break
+
                 loop_start = time.perf_counter()
 
                 obs = robot.get_observation()
@@ -355,13 +412,32 @@ def run_live_robot(args, runner, device):
                 robot_action = make_robot_action(action_tensor, dataset_features)
                 robot.send_action(robot_action)
 
-                if step % 30 == 0:
-                    vals = [round(float(v), 2) for v in robot_action.values()]
-                    print(f"ep {ep + 1} step {step:4d}/{args.max_steps} | action: {vals}")
+                if cv2 is not None:
+                    try:
+                        frames = [np.asarray(obs[name]) for name in cameras if name in obs]
+                        if frames:
+                            preview = np.hstack(frames)
+                            title = f"SO-101 {runner.arch.upper()} ({' | '.join(cameras.keys())})"
+                            cv2.imshow(title, cv2.cvtColor(preview, cv2.COLOR_RGB2BGR))
+                            if cv2.waitKey(1) & 0xFF == ord("q"):
+                                print("Stopped by user ('q').")
+                                stop_requested = True
+                                break
+                    except cv2.error as e:
+                        print(f"Warning: disabling --display preview ({e})")
+                        cv2 = None
 
-                elapsed = time.perf_counter() - loop_start
-                if elapsed < period_s:
-                    time.sleep(period_s - elapsed)
+                if step % log_interval == 0:
+                    vals = [round(float(v), 2) for v in robot_action.values()]
+                    step_label = f"{step:4d}/{args.max_steps}" if args.max_steps > 0 else f"{step:4d}"
+                    elapsed_total = time.perf_counter() - rollout_start
+                    print(f"ep {ep + 1} step {step_label} | t={elapsed_total:5.1f}s | action: {vals}")
+
+                step += 1
+                precise_sleep(period_s - (time.perf_counter() - loop_start))
+
+            if stop_requested:
+                break
     except KeyboardInterrupt:
         print("\n[Stopped] Deployment interrupted by user (Ctrl+C).")
     finally:
@@ -372,16 +448,19 @@ def run_live_robot(args, runner, device):
                 print("Robot disconnected safely.")
             except Exception as disc_err:
                 print(f"Warning: disconnect raised an error: {disc_err}")
+        if cv2 is not None:
+            with contextlib.suppress(cv2.error):
+                cv2.destroyAllWindows()
 
 
 def main():
     args = parse_args()
-    if args.fps <= 0 or args.episodes <= 0 or args.max_steps <= 0 or (
-        args.n_action_steps is not None and args.n_action_steps <= 0
-    ):
-        raise ValueError("--fps、--episodes、--max-steps 與 --n-action-steps 必須皆為正數。")
+    if args.fps <= 0 or args.episodes <= 0:
+        raise ValueError("--fps 與 --episodes 必須皆為正數。")
+    if args.max_steps <= 0 and args.duration <= 0:
+        raise ValueError("--max-steps 必須為正數（除非已設定 --duration > 0）。")
     if not (0.0 < args.action_ema <= 1.0):
-        raise ValueError("--action-ema 必須介於 (0.0, 1.0] 之間。")
+        raise ValueError("--action-ema / --ema 必須介於 (0.0, 1.0] 之間。")
 
     if args.offline:
         os.environ["HF_HUB_OFFLINE"] = "1"
@@ -407,7 +486,7 @@ def main():
 
     import torch
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading {arch.upper()} checkpoint from {ckpt_dir} on {device} ...")
     runner = PolicyRunner(arch, ckpt_dir, device, args.n_action_steps, action_ema=args.action_ema)
     print(f"Model ready | cameras={runner.camera_keys} | state_dim={runner.state_dim}")
