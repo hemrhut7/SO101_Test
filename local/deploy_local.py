@@ -103,6 +103,15 @@ def parse_args():
     )
     parser.add_argument("--cam-top", default="0", help="OpenCV index or device path for top camera.")
     parser.add_argument("--cam-front", default="2", help="OpenCV index or device path for front camera.")
+    parser.add_argument("--cam-wrist", default="0", help="OpenCV index or device path for wrist camera.")
+    parser.add_argument("--cam-side-45", default="2", help="OpenCV index or device path for side_45 camera.")
+    parser.add_argument(
+        "--cam",
+        nargs="*",
+        default=[],
+        metavar="NAME=SOURCE",
+        help="Optional generic camera overrides (e.g. --cam wrist=0 side_45=2).",
+    )
     parser.add_argument("--cam-width", type=int, default=640, help="Camera frame width.")
     parser.add_argument("--cam-height", type=int, default=480, help="Camera frame height.")
     parser.add_argument(
@@ -335,11 +344,20 @@ def run_live_robot(args, runner, device):
         cam_sources = {
             "top": _parse_cam_source(args.cam_top),
             "front": _parse_cam_source(args.cam_front),
+            "wrist": _parse_cam_source(args.cam_wrist),
+            "side_45": _parse_cam_source(args.cam_side_45),
         }
+        for item in args.cam:
+            if "=" not in item:
+                raise ValueError(f"--cam 格式應為 NAME=SOURCE（例如 wrist=0），目前收到：{item}")
+            name, src = item.split("=", 1)
+            cam_sources[name.strip()] = _parse_cam_source(src.strip())
         for cam_key in runner.camera_keys:
             cam_name = cam_key.split(".")[-1]
             if cam_name not in cam_sources:
-                raise ValueError(f"模型需要相機 {cam_key}，但未設定對應來源。")
+                raise ValueError(
+                    f"模型需要相機 {cam_key}，但未設定對應來源（可用 --cam {cam_name}=<編號或路徑> 指定）。"
+                )
             cameras[cam_name] = OpenCVCameraConfig(
                 index_or_path=cam_sources[cam_name],
                 width=args.cam_width,
