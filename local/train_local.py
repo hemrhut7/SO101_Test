@@ -1,10 +1,10 @@
 """Unified local training script for SO-101 (SmolVLA / ACT / FC MLP / CNN).
 
 Examples:
-    python local/train_local.py --arch fc
-    python local/train_local.py --arch cnn --batch-size 32 --steps 15000
-    python local/train_local.py --arch act --batch-size 16 --steps 15000
-    python local/train_local.py --arch smolvla --batch-size 16 --steps 15000
+    python local/train_local.py --arch smolvla --dataset so101_pick_teabag --batch-size 16 --steps 25000
+    python local/train_local.py --arch smolvla --dataset so101_pick_cube --batch-size 16 --steps 25000
+    python local/train_local.py --arch act --dataset so101_pick_teabag --batch-size 16 --steps 15000
+    python local/train_local.py --arch fc --dataset so101_pick_cube
 """
 
 import argparse
@@ -34,19 +34,24 @@ def parse_args():
         help="Model architecture to train.",
     )
     parser.add_argument(
+        "--dataset",
+        default=None,
+        help="Dataset folder name under ./datasets/ (e.g. so101_pick_teabag, so101_pick_cube).",
+    )
+    parser.add_argument(
         "--dataset-dir",
-        default=str(PROJECT_ROOT / "dataset"),
-        help="Path to local dataset directory (default: ./dataset).",
+        default=None,
+        help="Path to local dataset directory (default: ./datasets/<--dataset> or ./dataset).",
     )
     parser.add_argument(
         "--repo-id",
-        default="local/so101_pick_stylus",
-        help="LeRobot dataset repo_id identifier.",
+        default=None,
+        help="LeRobot dataset repo_id identifier (default: local/<dataset_name>).",
     )
     parser.add_argument(
         "--output-dir",
         default=None,
-        help="Output root directory (default: ./outputs/<arch>).",
+        help="Output root directory (default: ./outputs/<arch>/<dataset_name> for ./datasets/*, else ./outputs/<arch>).",
     )
     parser.add_argument("--chunk", type=int, default=50, help="Action chunk horizon.")
     parser.add_argument("--steps", type=int, default=15000, help="Total training steps.")
@@ -72,8 +77,8 @@ def parse_args():
     parser.add_argument(
         "--drop-longest-episodes",
         type=int,
-        default=10,
-        help="Exclude the N longest-duration episodes (default: 10, set 0 to disable).",
+        default=0,
+        help="Exclude the N longest-duration episodes (default: 0, set >0 to enable).",
     )
     parser.add_argument(
         "--exclude-episodes",
@@ -415,9 +420,22 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device} | torch: {torch.__version__} | arch: {args.arch}")
 
-    ds_root = resolve_dataset_root(args.dataset_dir)
+    if args.dataset and args.dataset_dir:
+        raise ValueError("不可同時指定 --dataset 與 --dataset-dir，請擇一使用。")
+    if args.dataset:
+        raw_dataset_dir = PROJECT_ROOT / "datasets" / args.dataset
+    elif args.dataset_dir:
+        raw_dataset_dir = Path(args.dataset_dir)
+    else:
+        raw_dataset_dir = PROJECT_ROOT / "dataset"
+
+    ds_root = resolve_dataset_root(raw_dataset_dir)
+    dataset_name = Path(ds_root).name
+    repo_id = args.repo_id or f"local/{dataset_name}"
     if args.output_dir:
         output_root = Path(args.output_dir).expanduser().resolve() / args.arch
+    elif args.dataset or Path(ds_root).parent.name == "datasets":
+        output_root = PROJECT_ROOT / "outputs" / args.arch / dataset_name
     else:
         output_root = PROJECT_ROOT / "outputs" / args.arch
     checkpoint_root = str(output_root / "checkpoints")
@@ -430,11 +448,12 @@ def main():
 
     recover_atomic_checkpoints(checkpoint_root)
 
-    ds_meta = LeRobotDatasetMetadata(args.repo_id, root=ds_root)
+    ds_meta = LeRobotDatasetMetadata(repo_id, root=ds_root)
     fps = ds_meta.fps
     delta_timestamps = {"action": [i / fps for i in range(args.chunk)]}
-    ds = LeRobotDataset(args.repo_id, root=ds_root, delta_timestamps=delta_timestamps, video_backend=args.video_backend)
-    print(f"Dataset root: {ds_root}")
+    ds = LeRobotDataset(repo_id, root=ds_root, delta_timestamps=delta_timestamps, video_backend=args.video_backend)
+    print(f"Dataset root: {ds_root} | repo_id: {repo_id}")
+    print(f"Output root: {output_root}")
     print(f"Loaded dataset: {ds.num_episodes} episodes, {ds.num_frames} frames @ {fps} FPS")
     print("Dataset cameras:", ds.meta.camera_keys)
 
