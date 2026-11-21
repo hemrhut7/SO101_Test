@@ -508,6 +508,8 @@ def main():
     print(f"Loading {arch.upper()} checkpoint from {ckpt_dir} on {device} ...")
     runner = PolicyRunner(arch, ckpt_dir, device, args.n_action_steps, action_ema=args.action_ema)
     print(f"Model ready | cameras={runner.camera_keys} | state_dim={runner.state_dim}")
+    if runner.arch == "smolvla":
+        print(f"Task: {args.task!r}")
 
     if args.dry_run:
         run_dry_run(args, runner, device)

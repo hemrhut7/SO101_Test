@@ -456,6 +456,9 @@ def main():
     print(f"Output root: {output_root}")
     print(f"Loaded dataset: {ds.num_episodes} episodes, {ds.num_frames} frames @ {fps} FPS")
     print("Dataset cameras:", ds.meta.camera_keys)
+    dataset_tasks = list(ds.meta.tasks.index) if getattr(ds.meta, "tasks", None) is not None else []
+    if args.arch == "smolvla" or dataset_tasks:
+        print("Dataset tasks:", dataset_tasks)
 
     if args.no_resume:
         existing = [n for n in os.listdir(checkpoint_root) if not n.startswith("_")]
@@ -553,6 +556,8 @@ def main():
             pin_memory=(device == "cuda" and args.num_workers > 0),
             persistent_workers=(args.num_workers > 0),
         )
+        if args.arch == "smolvla" or dataset_tasks:
+            print(f"Starting training from step {start_step}/{args.steps} | task(s): {dataset_tasks}")
         policy.train()
         it = iter(loader)
         start_t = time.time()
