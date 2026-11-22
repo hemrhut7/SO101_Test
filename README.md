@@ -294,6 +294,53 @@ uv run python -u local/deploy_local.py \
     --max-relative-target 5.0
 ```
 
+### 6. Sequence Model (support mix model)
+
+```bash
+uv run python -u local/deploy_sequence.py \
+    --checkpoints \
+        ./outputs/smolvla/so101_pick_cube/checkpoints/latest \
+        ./outputs/act/so101_put_into_cup/checkpoints/latest \
+        ./outputs/smolvla/so101_pick_teabag/checkpoints/latest \
+        ./outputs/act/so101_put_into_cup/checkpoints/latest \
+    --tasks "Pick up the cube" "" "Pick up the teabag" "" \
+    --stage-steps 750 750 750 750 \
+    --port /dev/ttyACM0 \
+    --robot-id my_follower \
+    --cam-wrist 0 \
+    --cam-side-45 2 \
+    --display \
+    --offline
+
+uv run python -u local/deploy_sequence.py \
+    --checkpoints \
+        ./outputs/smolvla/so101_pick_cube/checkpoints/latest \
+        ./outputs/smolvla/multitask/checkpoints/latest \
+        ./outputs/smolvla/so101_pick_teabag/checkpoints/latest \
+        ./outputs/smolvla/multitask/checkpoints/latest \
+    --tasks "Pick up the cube" "put the object into the cup" "Pick up the teabag" "put the object into the cup" \
+    --stage-steps 750 750 750 750 \
+    --port /dev/ttyACM0 \
+    --robot-id my_follower \
+    --cam-wrist 0 \
+    --cam-side-45 2 \
+    --display \
+    --offline
+
+uv run python -u local/deploy_sequence.py \
+    --checkpoints \
+        ./outputs/smolvla/so101_pick_teabag/checkpoints/latest \
+        ./outputs/smolvla/so101_pick_cube/checkpoints/latest \
+    --tasks "Pick up the teabag" "Pick up the cube" \
+    --stage-steps 750 750 \
+    --port /dev/ttyACM0 \
+    --robot-id my_follower \
+    --cam-wrist 0 \
+    --cam-side-45 2 \
+    --display \
+    --offline \
+    --return-home-between --wait-enter-between 
+```
 ### 常用實機微調參數
 - `--action-ema 0.5`（範圍 `(0, 1]`）：對連續動作進行指數移動平均平滑，可減少機械臂抖動。
 - `--max-relative-target 5.0`：限制單步關節角度最大變化量，提升實機安全性。

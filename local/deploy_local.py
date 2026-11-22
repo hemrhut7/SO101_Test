@@ -154,7 +154,7 @@ def parse_args():
     parser.add_argument(
         "--display",
         action="store_true",
-        help="Show live camera preview window during live deployment (press 'q' to stop).",
+        help="Show live camera preview window ('r'=restart task, 'n'=next stage, 'q'=stop).",
     )
 
     # Dry-run options
@@ -480,75 +480,85 @@ def run_live_robot(args, runner, device):
         stop_requested = False
 
         for ep in range(args.episodes):
-            for stage_idx, (stage_task, stage_max_steps) in enumerate(stages):
-                runner.reset()
-                stage_tag = f" | Stage {stage_idx + 1}/{len(stages)}" if len(stages) > 1 else ""
-                print(
-                    f"\n=== Episode {ep + 1}/{args.episodes}{stage_tag} | task: '{stage_task}' "
-                    f"| steps={stage_max_steps} | fps={args.fps} | action_ema={args.action_ema} ==="
-                )
-                step = 0
-                while stage_max_steps <= 0 or step < stage_max_steps:
-                    if args.duration > 0 and (time.perf_counter() - rollout_start) >= args.duration:
-                        print(f"Reached duration limit ({args.duration:.1f}s). Stopping.")
-                        stop_requested = True
+            while True:
+                restart_requested = False
+                for stage_idx, (stage_task, stage_max_steps) in enumerate(stages):
+                    runner.reset()
+                    stage_tag = f" | Stage {stage_idx + 1}/{len(stages)}" if len(stages) > 1 else ""
+                    print(
+                        f"\n=== Episode {ep + 1}/{args.episodes}{stage_tag} | task: '{stage_task}' "
+                        f"| steps={stage_max_steps} | fps={args.fps} | action_ema={args.action_ema} ==="
+                    )
+                    step = 0
+                    while stage_max_steps <= 0 or step < stage_max_steps:
+                        if args.duration > 0 and (time.perf_counter() - rollout_start) >= args.duration:
+                            print(f"Reached duration limit ({args.duration:.1f}s). Stopping.")
+                            stop_requested = True
+                            break
+
+                        loop_start = time.perf_counter()
+
+                        obs = robot.get_observation()
+                        obs_frame = build_inference_frame(
+                            observation=obs,
+                            ds_features=dataset_features,
+                            device=torch_device,
+                            task=stage_task,
+                            robot_type=robot_type,
+                        )
+                        action_tensor = runner.select_action(obs_frame)
+                        robot_action = make_robot_action(action_tensor, dataset_features)
+                        robot.send_action(robot_action)
+
+                        if cv2 is not None:
+                            try:
+                                frames = [np.asarray(obs[name]) for name in cameras if name in obs]
+                                if frames:
+                                    preview = np.hstack(frames)
+                                    bgr = cv2.cvtColor(preview, cv2.COLOR_RGB2BGR)
+                                    if len(stages) > 1:
+                                        cv2.putText(
+                                            bgr,
+                                            f"Stage {stage_idx + 1}/{len(stages)}: {stage_task}",
+                                            (12, 28),
+                                            cv2.FONT_HERSHEY_SIMPLEX,
+                                            0.7,
+                                            (0, 255, 0),
+                                            2,
+                                            cv2.LINE_AA,
+                                        )
+                                    title = f"SO-101 {runner.arch.upper()} ({' | '.join(cameras.keys())})"
+                                    cv2.imshow(title, bgr)
+                                    key = cv2.waitKey(1) & 0xFF
+                                    if key == ord("q"):
+                                        print("Stopped by user ('q').")
+                                        stop_requested = True
+                                        break
+                                    if key == ord("r"):
+                                        print(f"\n[Restart] 'r' pressed at step {step}. Returning to initial pose and restarting task...")
+                                        return_to_home(robot, target_pos=initial_pos, duration=max(0.0, args.home_duration))
+                                        restart_requested = True
+                                        break
+                                    if key == ord("n") and len(stages) > 1:
+                                        print(f"Advancing to next stage ('n' pressed at step {step}).")
+                                        break
+                            except cv2.error as e:
+                                print(f"Warning: disabling --display preview ({e})")
+                                cv2 = None
+
+                        if step % log_interval == 0:
+                            vals = [round(float(v), 2) for v in robot_action.values()]
+                            step_label = f"{step:4d}/{stage_max_steps}" if stage_max_steps > 0 else f"{step:4d}"
+                            elapsed_total = time.perf_counter() - rollout_start
+                            print(f"ep {ep + 1}{stage_tag} step {step_label} | t={elapsed_total:5.1f}s | action: {vals}")
+
+                        step += 1
+                        precise_sleep(period_s - (time.perf_counter() - loop_start))
+
+                    if stop_requested or restart_requested:
                         break
 
-                    loop_start = time.perf_counter()
-
-                    obs = robot.get_observation()
-                    obs_frame = build_inference_frame(
-                        observation=obs,
-                        ds_features=dataset_features,
-                        device=torch_device,
-                        task=stage_task,
-                        robot_type=robot_type,
-                    )
-                    action_tensor = runner.select_action(obs_frame)
-                    robot_action = make_robot_action(action_tensor, dataset_features)
-                    robot.send_action(robot_action)
-
-                    if cv2 is not None:
-                        try:
-                            frames = [np.asarray(obs[name]) for name in cameras if name in obs]
-                            if frames:
-                                preview = np.hstack(frames)
-                                bgr = cv2.cvtColor(preview, cv2.COLOR_RGB2BGR)
-                                if len(stages) > 1:
-                                    cv2.putText(
-                                        bgr,
-                                        f"Stage {stage_idx + 1}/{len(stages)}: {stage_task}",
-                                        (12, 28),
-                                        cv2.FONT_HERSHEY_SIMPLEX,
-                                        0.7,
-                                        (0, 255, 0),
-                                        2,
-                                        cv2.LINE_AA,
-                                    )
-                                title = f"SO-101 {runner.arch.upper()} ({' | '.join(cameras.keys())})"
-                                cv2.imshow(title, bgr)
-                                key = cv2.waitKey(1) & 0xFF
-                                if key == ord("q"):
-                                    print("Stopped by user ('q').")
-                                    stop_requested = True
-                                    break
-                                if key == ord("n") and len(stages) > 1:
-                                    print(f"Advancing to next stage ('n' pressed at step {step}).")
-                                    break
-                        except cv2.error as e:
-                            print(f"Warning: disabling --display preview ({e})")
-                            cv2 = None
-
-                    if step % log_interval == 0:
-                        vals = [round(float(v), 2) for v in robot_action.values()]
-                        step_label = f"{step:4d}/{stage_max_steps}" if stage_max_steps > 0 else f"{step:4d}"
-                        elapsed_total = time.perf_counter() - rollout_start
-                        print(f"ep {ep + 1}{stage_tag} step {step_label} | t={elapsed_total:5.1f}s | action: {vals}")
-
-                    step += 1
-                    precise_sleep(period_s - (time.perf_counter() - loop_start))
-
-                if stop_requested:
+                if stop_requested or not restart_requested:
                     break
 
             if stop_requested:
