@@ -151,7 +151,52 @@ uv run python -u local/deploy_local.py \
     --cam-wrist 0 \
     --cam-side-45 2 \
     --task "Pick up the teabag" \
-    --n-action-steps 35 \
+    --max-relative-target 5.0 \
+    --display \
+    --offline
+
+uv run python -u local/deploy_local.py \
+    --checkpoint ./outputs/smolvla/so101_pick_style_bs16_teabag/checkpoints/latest \
+    --port /dev/ttyACM0 \
+    --robot-id my_follower \
+    --cam-wrist 0 \
+    --cam-side-45 2 \
+    --task "Pick up the teabag" \
+    --max-relative-target 5.0 \
+    --display \
+    --offline
+
+uv run python -u local/deploy_local.py \
+    --checkpoint ./outputs/smolvla/so101_pick_cube/checkpoints/latest \
+    --port /dev/ttyACM0 \
+    --robot-id my_follower \
+    --cam-wrist 0 \
+    --cam-side-45 2 \
+    --task "Pick up the cube" \
+    --max-relative-target 5.0 \
+    --display \
+    --offline
+
+uv run python -u local/deploy_local.py \
+    --checkpoint ./outputs/smolvla/multitask/checkpoints/latest \
+    --port /dev/ttyACM0 \
+    --robot-id my_follower \
+    --cam-wrist 0 \
+    --cam-side-45 2 \
+    --tasks "Pick up the cube" \
+    --stage-steps 800 \
+    --max-relative-target 5.0 \
+    --display \
+    --offline
+
+uv run python -u local/deploy_local.py \
+    --checkpoint ./outputs/smolvla/multitask/checkpoints/latest \
+    --port /dev/ttyACM0 \
+    --robot-id my_follower \
+    --cam-wrist 0 \
+    --cam-side-45 2 \
+    --tasks "Pick up the cube" "put the object into the cup" \
+    --stage-steps 800 800 \
     --max-relative-target 5.0 \
     --display \
     --offline
@@ -166,7 +211,33 @@ uv run python -u local/deploy_local.py \
     --robot-id my_follower \
     --cam-wrist 0 \
     --cam-side-45 2 \
-    --n-action-steps 35 \
+    --max-relative-target 5.0 \
+    --display
+
+uv run python -u local/deploy_local.py \
+    --checkpoint ./outputs/act/so101_pick_cube/checkpoints/latest \
+    --port /dev/ttyACM0 \
+    --robot-id my_follower \
+    --cam-wrist 0 \
+    --cam-side-45 2 \
+    --max-relative-target 5.0 \
+    --display
+
+uv run python -u local/deploy_local.py \
+    --checkpoint ./outputs/act/so101_put_into_cup/checkpoints/latest \
+    --port /dev/ttyACM0 \
+    --robot-id my_follower \
+    --cam-wrist 0 \
+    --cam-side-45 2 \
+    --max-relative-target 5.0 \
+    --display
+
+uv run python -u local/deploy_local.py \
+    --checkpoint ./outputs/act/multitask/checkpoints/latest \
+    --port /dev/ttyACM0 \
+    --robot-id my_follower \
+    --cam-wrist 0 \
+    --cam-side-45 2 \
     --max-relative-target 5.0 \
     --display
 ```

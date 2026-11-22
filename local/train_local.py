@@ -39,6 +39,12 @@ def parse_args():
         help="Dataset folder name under ./datasets/ (e.g. so101_pick_teabag, so101_pick_cube).",
     )
     parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=None,
+        help="Multiple dataset folder names under ./datasets/ for multi-task training.",
+    )
+    parser.add_argument(
         "--dataset-dir",
         default=None,
         help="Path to local dataset directory (default: ./datasets/<--dataset> or ./dataset).",
@@ -389,6 +395,40 @@ def save_checkpoint(
         shutil.rmtree(staging_dir, ignore_errors=True)
 
 
+def merge_dataset_stats(stats_list):
+    """Merge normalization statistics across multiple LeRobotDatasets by sample count."""
+    import copy
+    import numpy as np
+
+    merged = {}
+    for key in stats_list[0].keys():
+        if not all(key in s for s in stats_list):
+            continue
+        first = stats_list[0][key]
+        if "mean" not in first or "std" not in first or "count" not in first:
+            merged[key] = copy.deepcopy(first)
+            continue
+        counts = [np.asarray(s[key]["count"], dtype=np.float64) for s in stats_list]
+        means = [np.asarray(s[key]["mean"], dtype=np.float64) for s in stats_list]
+        stds = [np.asarray(s[key]["std"], dtype=np.float64) for s in stats_list]
+        mins = [np.asarray(s[key]["min"], dtype=np.float64) for s in stats_list]
+        maxs = [np.asarray(s[key]["max"], dtype=np.float64) for s in stats_list]
+
+        total_count = np.sum(counts, axis=0)
+        safe_count = np.maximum(total_count, 1.0)
+        comb_mean = np.sum([c * m for c, m in zip(counts, means)], axis=0) / safe_count
+        comb_var = np.sum([c * (s ** 2 + (m - comb_mean) ** 2) for c, m, s in zip(counts, means, stds)], axis=0) / safe_count
+        comb_std = np.sqrt(np.maximum(comb_var, 0.0))
+        merged[key] = {
+            "min": np.min(mins, axis=0),
+            "max": np.max(maxs, axis=0),
+            "mean": comb_mean,
+            "std": comb_std,
+            "count": total_count,
+        }
+    return merged
+
+
 def main():
     args = parse_args()
     is_lerobot_policy = args.arch in ("smolvla", "act")
@@ -420,22 +460,29 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device} | torch: {torch.__version__} | arch: {args.arch}")
 
-    if args.dataset and args.dataset_dir:
-        raise ValueError("不可同時指定 --dataset 與 --dataset-dir，請擇一使用。")
-    if args.dataset:
-        raw_dataset_dir = PROJECT_ROOT / "datasets" / args.dataset
-    elif args.dataset_dir:
-        raw_dataset_dir = Path(args.dataset_dir)
-    else:
-        raw_dataset_dir = PROJECT_ROOT / "dataset"
+    specified_sources = sum(bool(x) for x in (args.dataset, args.datasets, args.dataset_dir))
+    if specified_sources > 1:
+        raise ValueError("不可同時指定 --dataset、--datasets 與 --dataset-dir，請擇一使用。")
 
-    ds_root = resolve_dataset_root(raw_dataset_dir)
-    dataset_name = Path(ds_root).name
-    repo_id = args.repo_id or f"local/{dataset_name}"
+    if args.datasets:
+        dataset_roots = [resolve_dataset_root(PROJECT_ROOT / "datasets" / name) for name in args.datasets]
+        output_subdir = "multitask"
+    else:
+        if args.dataset:
+            raw_dataset_dir = PROJECT_ROOT / "datasets" / args.dataset
+        elif args.dataset_dir:
+            raw_dataset_dir = Path(args.dataset_dir)
+        else:
+            raw_dataset_dir = PROJECT_ROOT / "dataset"
+        single_root = resolve_dataset_root(raw_dataset_dir)
+        dataset_roots = [single_root]
+        dataset_name = Path(single_root).name
+        output_subdir = dataset_name if (args.dataset or Path(single_root).parent.name == "datasets") else None
+
     if args.output_dir:
         output_root = Path(args.output_dir).expanduser().resolve() / args.arch
-    elif args.dataset or Path(ds_root).parent.name == "datasets":
-        output_root = PROJECT_ROOT / "outputs" / args.arch / dataset_name
+    elif output_subdir:
+        output_root = PROJECT_ROOT / "outputs" / args.arch / output_subdir
     else:
         output_root = PROJECT_ROOT / "outputs" / args.arch
     checkpoint_root = str(output_root / "checkpoints")
@@ -448,15 +495,31 @@ def main():
 
     recover_atomic_checkpoints(checkpoint_root)
 
-    ds_meta = LeRobotDatasetMetadata(repo_id, root=ds_root)
-    fps = ds_meta.fps
-    delta_timestamps = {"action": [i / fps for i in range(args.chunk)]}
-    ds = LeRobotDataset(repo_id, root=ds_root, delta_timestamps=delta_timestamps, video_backend=args.video_backend)
-    print(f"Dataset root: {ds_root} | repo_id: {repo_id}")
+    ds_pairs = []
+    all_tasks = []
+    for ds_root_i in dataset_roots:
+        name_i = Path(ds_root_i).name
+        repo_id_i = args.repo_id or f"local/{name_i}"
+        ds_meta_i = LeRobotDatasetMetadata(repo_id_i, root=ds_root_i)
+        fps_i = ds_meta_i.fps
+        delta_timestamps_i = {"action": [i / fps_i for i in range(args.chunk)]}
+        ds_i = LeRobotDataset(
+            repo_id_i,
+            root=ds_root_i,
+            delta_timestamps=delta_timestamps_i,
+            video_backend=args.video_backend,
+        )
+        ds_tasks_i = list(ds_i.meta.tasks.index) if getattr(ds_i.meta, "tasks", None) is not None else []
+        all_tasks.extend(ds_tasks_i)
+        ds_pairs.append((ds_i, ds_root_i))
+        print(f"Dataset root: {ds_root_i} | repo_id: {repo_id_i} | {ds_i.num_episodes} eps, {ds_i.num_frames} frames @ {fps_i} FPS")
+
+    ds = ds_pairs[0][0]
+    if len(ds_pairs) > 1:
+        ds.meta.stats = merge_dataset_stats([d.meta.stats for d, _ in ds_pairs])
+    dataset_tasks = list(dict.fromkeys(all_tasks))
     print(f"Output root: {output_root}")
-    print(f"Loaded dataset: {ds.num_episodes} episodes, {ds.num_frames} frames @ {fps} FPS")
     print("Dataset cameras:", ds.meta.camera_keys)
-    dataset_tasks = list(ds.meta.tasks.index) if getattr(ds.meta, "tasks", None) is not None else []
     if args.arch == "smolvla" or dataset_tasks:
         print("Dataset tasks:", dataset_tasks)
 
@@ -527,21 +590,24 @@ def main():
             or args.drop_longest_episodes > 0
             or bool(manual_excludes)
         )
-        train_ds = (
-            build_trimmed_subset(
-                ds,
-                ds_root,
-                move_thresh=args.move_thresh,
-                keep_lead_frames=args.keep_lead_frames,
-                keep_tail_frames=args.keep_tail_frames,
-                trim_head=not args.no_trim,
-                trim_tail=(not args.no_trim and not args.no_trim_tail),
-                drop_longest_n=args.drop_longest_episodes,
-                exclude_episodes=manual_excludes,
-            )
-            if use_filter
-            else ds
-        )
+        if use_filter:
+            subsets = [
+                build_trimmed_subset(
+                    ds_i,
+                    ds_root_i,
+                    move_thresh=args.move_thresh,
+                    keep_lead_frames=args.keep_lead_frames,
+                    keep_tail_frames=args.keep_tail_frames,
+                    trim_head=not args.no_trim,
+                    trim_tail=(not args.no_trim and not args.no_trim_tail),
+                    drop_longest_n=args.drop_longest_episodes,
+                    exclude_episodes=manual_excludes,
+                )
+                for ds_i, ds_root_i in ds_pairs
+            ]
+        else:
+            subsets = [ds_i for ds_i, _ in ds_pairs]
+        train_ds = subsets[0] if len(subsets) == 1 else torch.utils.data.ConcatDataset(subsets)
         if len(train_ds) < batch_size:
             raise ValueError(
                 f"可用訓練樣本數 ({len(train_ds)}) 小於 batch_size ({batch_size})，"
