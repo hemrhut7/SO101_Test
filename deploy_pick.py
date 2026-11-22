@@ -23,6 +23,8 @@ from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 from lerobot.robots.so_follower import SO101FollowerConfig, SOFollower
 from lerobot.utils.robot_utils import precise_sleep
 
+HOMING_RAW_POS = 2048
+
 JOINT_NAMES = (
     "shoulder_pan.pos",
     "shoulder_lift.pos",
@@ -96,7 +98,45 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show live camera preview window (press 'q' to stop).",
     )
+    parser.add_argument(
+        "--home-duration",
+        type=float,
+        default=2.0,
+        help="Seconds to smoothly return arm to its initial pose before disconnecting (default: 2.0).",
+    )
+    parser.add_argument(
+        "--no-go-home",
+        action="store_true",
+        help="Skip returning to initial pose before disconnecting.",
+    )
+    parser.add_argument(
+        "--keep-torque",
+        action="store_true",
+        help="Keep motor torque enabled after disconnecting.",
+    )
     return parser.parse_args()
+
+
+def return_to_home(
+    robot: SOFollower,
+    target_pos: dict[str, int] | None = None,
+    duration: float = 2.0,
+    steps: int = 60,
+) -> None:
+    """Smoothly move the SO-101 arm back to target_pos (or raw 2048 if None)."""
+    start_pos = robot.bus.sync_read("Present_Position", normalize=False)
+    if target_pos is None:
+        target_pos = {motor: HOMING_RAW_POS for motor in robot.bus.motors}
+    dt = duration / steps if duration > 0 else 0.0
+    for i in range(1, steps + 1):
+        alpha = i / steps
+        interp = {
+            motor: int(start_pos[motor] + alpha * (target_pos[motor] - start_pos[motor]))
+            for motor in robot.bus.motors
+        }
+        robot.bus.sync_write("Goal_Position", interp, normalize=False)
+        if dt > 0:
+            time.sleep(dt)
 
 
 def build_batch(obs: dict[str, object], task: str) -> dict[str, object]:
@@ -160,6 +200,7 @@ def main() -> None:
         id=args.robot_id,
         cameras=cameras,
         max_relative_target=args.max_relative_target,
+        disable_torque_on_disconnect=not args.keep_torque,
     )
     robot = SOFollower(robot_cfg)
 
@@ -171,6 +212,7 @@ def main() -> None:
 
     print("Connecting to SO-101 follower and cameras...")
     robot.connect()
+    initial_pos = robot.bus.sync_read("Present_Position", normalize=False)
     print(
         f"Running policy for task: {args.task!r} at {args.fps} Hz "
         f"(n_action_steps={policy.config.n_action_steps}, ema={args.ema}). Press Ctrl+C to stop."
@@ -224,6 +266,12 @@ def main() -> None:
         print("\nInterrupted by user (Ctrl+C).")
     finally:
         if robot.is_connected:
+            if not args.no_go_home:
+                try:
+                    print("Returning SO-101 to initial pose...")
+                    return_to_home(robot, target_pos=initial_pos, duration=max(0.0, args.home_duration))
+                except Exception as e:
+                    print(f"Warning: failed to return to initial pose before disconnect ({e})")
             robot.disconnect()
         if cv2 is not None:
             with contextlib.suppress(cv2.error):

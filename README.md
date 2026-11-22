@@ -176,6 +176,10 @@ uv run python -u local/deploy_local.py \
     --max-relative-target 5.0 \
     --display \
     --offline
+```
+
+multitask
+```bash
 
 uv run python -u local/deploy_local.py \
     --checkpoint ./outputs/smolvla/multitask/checkpoints/latest \
@@ -184,6 +188,18 @@ uv run python -u local/deploy_local.py \
     --cam-wrist 0 \
     --cam-side-45 2 \
     --tasks "Pick up the cube" \
+    --stage-steps 800 \
+    --max-relative-target 5.0 \
+    --display \
+    --offline
+
+uv run python -u local/deploy_local.py \
+    --checkpoint ./outputs/smolvla/multitask/checkpoints/latest \
+    --port /dev/ttyACM0 \
+    --robot-id my_follower \
+    --cam-wrist 0 \
+    --cam-side-45 2 \
+    --tasks "put the object into the cup" \
     --stage-steps 800 \
     --max-relative-target 5.0 \
     --display \

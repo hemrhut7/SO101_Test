@@ -114,6 +114,22 @@ def parse_args():
         default=None,
         help="Optional safety clamp on per-step joint angle delta.",
     )
+    parser.add_argument(
+        "--home-duration",
+        type=float,
+        default=2.0,
+        help="Seconds to smoothly return arm to its initial pose before disconnecting (default: 2.0).",
+    )
+    parser.add_argument(
+        "--no-go-home",
+        action="store_true",
+        help="Skip returning to initial pose before disconnecting.",
+    )
+    parser.add_argument(
+        "--keep-torque",
+        action="store_true",
+        help="Keep motor torque enabled after disconnecting.",
+    )
     parser.add_argument("--cam-top", default="0", help="OpenCV index or device path for top camera.")
     parser.add_argument("--cam-front", default="2", help="OpenCV index or device path for front camera.")
     parser.add_argument("--cam-wrist", default="0", help="OpenCV index or device path for wrist camera.")
@@ -336,6 +352,23 @@ def run_dry_run(args, runner, device):
     print(f"[Dry-Run Done] avg latency: {avg_ms:.2f} ms ({1000.0 / max(avg_ms, 1e-6):.1f} Hz)")
 
 
+def return_to_home(robot, target_pos=None, duration=2.0, steps=60):
+    """Smoothly move the SO-101 arm back to target_pos (or raw 2048 if None)."""
+    start_pos = robot.bus.sync_read("Present_Position", normalize=False)
+    if target_pos is None:
+        target_pos = {motor: 2048 for motor in robot.bus.motors}
+    dt = duration / steps if duration > 0 else 0.0
+    for i in range(1, steps + 1):
+        alpha = i / steps
+        interp = {
+            motor: int(start_pos[motor] + alpha * (target_pos[motor] - start_pos[motor]))
+            for motor in robot.bus.motors
+        }
+        robot.bus.sync_write("Goal_Position", interp, normalize=False)
+        if dt > 0:
+            time.sleep(dt)
+
+
 def resolve_task_stages(args):
     """Build ordered (task_text, max_steps) stages from --tasks/--stage-steps or --task."""
     if not args.tasks:
@@ -408,6 +441,8 @@ def run_live_robot(args, runner, device):
     }
     if "use_degrees" in inspect.signature(SO101FollowerConfig).parameters:
         robot_kwargs["use_degrees"] = not args.no_use_degrees
+    if "disable_torque_on_disconnect" in inspect.signature(SO101FollowerConfig).parameters:
+        robot_kwargs["disable_torque_on_disconnect"] = not args.keep_torque
     if args.max_relative_target is not None:
         robot_kwargs["max_relative_target"] = args.max_relative_target
 
@@ -425,10 +460,15 @@ def run_live_robot(args, runner, device):
     period_s = 1.0 / max(args.fps, 1e-6)
     torch_device = torch.device(device)
     log_interval = max(1, int(args.fps))
+    initial_pos = None
 
     try:
         print(f"Connecting SO-101 on {args.port} (id={args.robot_id}, cameras={list(cameras.keys())}) ...")
         robot.connect(calibrate=args.calibrate)
+        try:
+            initial_pos = robot.bus.sync_read("Present_Position", normalize=False)
+        except Exception as e:
+            print(f"Warning: failed to read initial pose ({e}); will fall back to raw 2048 on exit.")
 
         action_features = hw_to_dataset_features(robot.action_features, "action")
         obs_features = hw_to_dataset_features(robot.observation_features, "observation")
@@ -517,6 +557,12 @@ def run_live_robot(args, runner, device):
         print("\n[Stopped] Deployment interrupted by user (Ctrl+C).")
     finally:
         if getattr(robot, "is_connected", True):
+            if not args.no_go_home:
+                try:
+                    print("Returning SO-101 to initial pose...")
+                    return_to_home(robot, target_pos=initial_pos, duration=max(0.0, args.home_duration))
+                except Exception as home_err:
+                    print(f"Warning: failed to return to initial pose before disconnect ({home_err})")
             print("Disconnecting SO-101 robot ...")
             try:
                 robot.disconnect()
