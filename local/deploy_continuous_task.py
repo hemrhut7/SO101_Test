@@ -174,14 +174,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yolo-config", default=str(DEFAULT_CONFIG_PATH), help="YOLOE visual prompt JSON config.")
     parser.add_argument("--yolo-mode", default="yoloe", choices=["yoloe", "standard"], help="YOLOE visual prompt or standard YOLO.")
     parser.add_argument("--yolo-conf", type=float, default=0.25, help="YOLOE confidence threshold.")
-    parser.add_argument("--yolo-interval", type=int, default=3, help="Run YOLOE every N control steps (3 = 10 Hz at 30 FPS).")
-    parser.add_argument("--pick-timeout", type=float, default=25.0, help="Timeout (seconds) for pick stages before auto-reset.")
-    parser.add_argument("--put-timeout", type=float, default=25.0, help="Timeout (seconds) for put stages before auto-reset.")
-    parser.add_argument("--shake-duration", type=float, default=15.0, help="Duration (seconds) for shake the cup stage.")
+    parser.add_argument("--yolo-hz", type=float, default=10.0, help="Target YOLOE update rate in Hz (<= 0 falls back to --yolo-interval).")
+    parser.add_argument("--yolo-interval", type=int, default=3, help="Fallback step interval when --yolo-hz <= 0.")
+    parser.add_argument("--pick-timeout", type=float, default=40.0, help="Timeout (seconds) for pick stages before auto-reset.")
+    parser.add_argument("--put-timeout", type=float, default=50.0, help="Timeout (seconds) for put stages before auto-reset.")
+    parser.add_argument("--shake-duration", type=float, default=30.0, help="Duration (seconds) for shake the cup stage.")
     parser.add_argument("--min-pick-steps", type=int, default=300, help="Minimum steps before grasp verification triggers.")
-    parser.add_argument("--min-put-steps", type=int, default=60, help="Minimum steps before cup release verification triggers.")
-    parser.add_argument("--grasp-stable-checks", type=int, default=30, help="Consecutive YOLO checks to confirm grasp.")
-    parser.add_argument("--put-stable-checks", type=int, default=8, help="Consecutive YOLO checks to confirm opaque-cup placement.")
+    parser.add_argument("--min-put-steps", type=int, default=200, help="Minimum steps before cup release verification triggers.")
+    parser.add_argument("--grasp-stable-checks", type=int, default=20, help="Consecutive YOLO checks to confirm grasp.")
+    parser.add_argument("--put-stable-checks", type=int, default=20, help="Consecutive YOLO checks to confirm opaque-cup placement.")
     parser.add_argument("--lift-px", type=float, default=40.0, help="Upward pixel shift on side_45 to confirm lifted grasp.")
     parser.add_argument("--gripper-open-thresh", type=float, default=28.0, help="Gripper joint degree threshold indicating open jaw.")
     parser.add_argument("--max-retries", type=int, default=3, help="Maximum auto-resets per stage before aborting.")
@@ -193,6 +194,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-use-degrees", action="store_true", help="Disable use_degrees=True.")
     parser.add_argument("--max-relative-target", type=float, default=5.0, help="Safety clamp on per-step joint angle delta.")
     parser.add_argument("--home-duration", type=float, default=1.8, help="Smooth homing duration in seconds.")
+    parser.add_argument(
+        "--put-start-pose",
+        default="-8.8,-0.7,14.5,0.4,86.6",
+        help="5-DOF arm pose (deg: pan,lift,elbow,wflex,wroll) to move to after 'pick' while keeping gripper closed; or 'home' / 'off'.",
+    )
     parser.add_argument("--no-go-home", action="store_true", help="Skip homing before disconnect.")
     parser.add_argument("--keep-torque", action="store_true", help="Keep motor torque after disconnect.")
     parser.add_argument("--cam-wrist", default="0", help="OpenCV index/path for wrist camera.")
@@ -225,6 +231,68 @@ def _release_gripper_if_closed(robot: Any, open_delta_raw: int = 250) -> None:
             time.sleep(0.25)
     except Exception:
         pass
+
+
+def _parse_put_start_pose(raw: str) -> tuple[str, list[float] | None]:
+    """Parse --put-start-pose into ('off'|'home'|'deg', optional 5-DOF degree list)."""
+    text = str(raw).strip().lower()
+    if text in ("off", "none", ""):
+        return "off", None
+    if text == "home":
+        return "home", None
+    parts = [p.strip() for p in str(raw).split(",") if p.strip()]
+    if len(parts) != 5:
+        raise ValueError(
+            f"--put-start-pose 必須為 'off'、'home' 或 5 個逗號分隔的角度值 (pan,lift,elbow,wflex,wroll)，目前為 {raw!r}"
+        )
+    return "deg", [float(p) for p in parts]
+
+
+def move_arm_preserve_gripper(
+    robot: Any,
+    mode: str,
+    target_deg: list[float] | None = None,
+    home_raw: dict[str, int] | None = None,
+    duration: float = 1.5,
+    steps: int = 45,
+) -> None:
+    """Smoothly move the 5 arm joints to a put-start pose while keeping the gripper closed."""
+    if mode == "off":
+        return
+    dt = duration / steps if duration > 0 else 0.0
+    if mode == "home":
+        start_pos = robot.bus.sync_read("Present_Position", normalize=False)
+        target = {
+            m: (start_pos[m] if m == "gripper" else int((home_raw or {}).get(m, 2048)))
+            for m in robot.bus.motors
+        }
+        for i in range(1, steps + 1):
+            alpha = i / steps
+            interp = {
+                m: int(start_pos[m] + alpha * (target[m] - start_pos[m]))
+                for m in robot.bus.motors
+            }
+            robot.bus.sync_write("Goal_Position", interp, normalize=False)
+            if dt > 0:
+                time.sleep(dt)
+        return
+
+    if mode == "deg" and target_deg is not None:
+        arm_motors = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
+        start_pos = robot.bus.sync_read("Present_Position", normalize=True)
+        target_map = dict(zip(arm_motors, target_deg))
+        gripper_hold = float(start_pos["gripper"]) if "gripper" in start_pos else None
+        for i in range(1, steps + 1):
+            alpha = i / steps
+            interp = {}
+            for m in robot.bus.motors:
+                if m in target_map and m in start_pos:
+                    interp[m] = float(start_pos[m]) + alpha * (target_map[m] - float(start_pos[m]))
+                elif m == "gripper" and gripper_hold is not None:
+                    interp[m] = gripper_hold
+            robot.bus.sync_write("Goal_Position", interp, normalize=True)
+            if dt > 0:
+                time.sleep(dt)
 
 
 def run_dry_run_simulation(
@@ -310,6 +378,8 @@ def run_dry_run_simulation(
             step += 1
 
         if outcome == "done":
+            if spec.mode == "pick" and args.put_start_pose.strip().lower() not in ("off", "none", ""):
+                print(f"  [Transition] Moving arm to put-start pose ({args.put_start_pose}) with gripper preserved.")
             if spec.return_home_after:
                 print("  [Home] Smoothly returned to Home -> re-captured YOLOE baseline.")
                 monitor.capture_baseline(dummy_obs)
@@ -356,6 +426,7 @@ def run_live_continuous_task(
         device=pool.device,
         conf=args.yolo_conf,
         yolo_interval=args.yolo_interval,
+        yolo_hz=args.yolo_hz,
         grasp_stable_checks=args.grasp_stable_checks,
         put_stable_checks=args.put_stable_checks,
         lift_px=args.lift_px,
@@ -410,6 +481,7 @@ def run_live_continuous_task(
     period_s = 1.0 / max(args.fps, 1e-6)
     torch_device = torch.device(pool.device)
     log_interval = max(1, int(args.fps))
+    put_pose_mode, put_pose_deg = _parse_put_start_pose(args.put_start_pose)
     initial_pos = None
 
     try:
@@ -546,6 +618,15 @@ def run_live_continuous_task(
                 break
 
             if outcome == "done":
+                if spec.mode == "pick" and put_pose_mode != "off":
+                    print(f"Moving arm smoothly to put-start pose ({args.put_start_pose}) while keeping gripper closed...")
+                    move_arm_preserve_gripper(
+                        robot,
+                        mode=put_pose_mode,
+                        target_deg=put_pose_deg,
+                        home_raw=initial_pos,
+                        duration=max(0.5, args.home_duration * 0.8),
+                    )
                 if spec.return_home_after:
                     print("Returning arm smoothly to Home pose before next stage...")
                     return_to_home(robot, target_pos=initial_pos, duration=max(0.0, args.home_duration))

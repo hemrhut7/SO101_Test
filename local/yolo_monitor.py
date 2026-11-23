@@ -213,6 +213,7 @@ class YOLOEPerceptionMonitor:
         device: str | None = None,
         conf: float = 0.25,
         yolo_interval: int = 3,
+        yolo_hz: float | None = 10.0,
         side_cam_key: str = "side_45",
         wrist_cam_key: str = "wrist",
         grasp_stable_checks: int = 5,
@@ -236,6 +237,7 @@ class YOLOEPerceptionMonitor:
         self.device = resolve_yolo_device(device)
         self.conf = float(conf)
         self.yolo_interval = max(1, int(yolo_interval))
+        self.yolo_hz = float(yolo_hz) if yolo_hz is not None and float(yolo_hz) > 0 else None
         self.side_cam_key = side_cam_key
         self.wrist_cam_key = wrist_cam_key
         self.grasp_stable_checks = max(1, int(grasp_stable_checks))
@@ -277,6 +279,7 @@ class YOLOEPerceptionMonitor:
         self.latest_detections: dict[str, DetectionBox] = {}
         self.latest_wrist_detections: dict[str, DetectionBox] = {}
         self._last_infer_step = -999
+        self._last_infer_t = -1e9
         self._last_infer_ms = 0.0
 
         # Per-stage latch/stability counters
@@ -327,9 +330,13 @@ class YOLOEPerceptionMonitor:
         return best
 
     def update_detections(self, obs: dict[str, Any], step: int, force: bool = False) -> bool:
-        """Run YOLOE inference when ``step`` hits ``yolo_interval`` (or ``force=True``)."""
-        if not force and (step - self._last_infer_step) < self.yolo_interval:
-            return False
+        """Run YOLOE inference at ``yolo_hz`` (or every ``yolo_interval`` steps, or ``force=True``)."""
+        if not force:
+            if self.yolo_hz is not None:
+                if (time.perf_counter() - self._last_infer_t) < (1.0 / self.yolo_hz):
+                    return False
+            elif (step - self._last_infer_step) < self.yolo_interval:
+                return False
         bgr_side = self._extract_bgr(obs, self.side_cam_key)
         if bgr_side is not None:
             self.latest_detections = self._predict_frame(bgr_side)
@@ -337,12 +344,14 @@ class YOLOEPerceptionMonitor:
         if bgr_wrist is not None:
             self.latest_wrist_detections = self._predict_frame(bgr_wrist)
         self._last_infer_step = step
+        self._last_infer_t = time.perf_counter()
         return True
 
     def capture_baseline(self, obs: dict[str, Any]) -> dict[str, DetectionBox]:
         """Snapshot desktop object positions while arm is at Home pose."""
         self.update_detections(obs, step=0, force=True)
         self._last_infer_step = -999
+        self._last_infer_t = -1e9
         for name, det in self.latest_detections.items():
             self.baseline_boxes[name] = det
         if "cup" in self.baseline_boxes:
