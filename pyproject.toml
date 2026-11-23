@@ -13,6 +13,7 @@ dependencies = [
     "av",
     "opencv-python",
     "huggingface-hub",
+    "ultralytics>=8.4.123",
 ]
 
 [tool.uv]

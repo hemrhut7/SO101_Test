@@ -15,20 +15,30 @@ SO101_Test/
 │   ├── smolVLA_train.ipynb              # 原始範例（so101_pick_stylus）
 │   ├── smolVLA_train_pick_cube.ipynb    # SmolVLA 微調（so101_pick_cube）
 │   ├── smolVLA_train_pick_teabag.ipynb  # SmolVLA 微調（so101_pick_teabag）
+│   ├── smolVLA_train_put_into_cup.ipynb # SmolVLA 微調（so101_put_into_cup）
+│   ├── smolVLA_train_shake_cup.ipynb    # SmolVLA 微調（so101_shake_cup）
+│   ├── smolVLA_train_multitask.ipynb    # SmolVLA 多任務微調
 │   ├── act_train.ipynb
 │   ├── cnn_train.ipynb
 │   └── fc_train.ipynb
-├── local/                               # 本機訓練與 SO-101 實機部署腳本
+├── local/                               # 本機訓練與 SO-101 部署腳本
 │   ├── train_local.py
-│   ├── deploy_local.py
+│   ├── deploy_local.py                  # 單任務 / 多階段任務部署（SmolVLA / ACT / CNN / FC）
+│   ├── deploy_sequence.py               # 多模型串接部署（支援混搭 SmolVLA / ACT / CNN / FC）
+│   ├── deploy_continuous_task.py        # 閉迴路 5 階段連續任務部署（YOLOE + SmolVLA）
+│   ├── smolvla_pool.py                  # SmolVLA 多模型預載與熱切換池（gpu_full / gpu_experts / cpu_pinned）
+│   ├── yolo_monitor.py                  # YOLOE visual-prompt 視覺監控與不透明杯狀態驗證
 │   ├── local_policies.py
 │   └── local_utils.py
-├── tools/                               # 硬體檢測與輔助工具
+├── tools/                               # 硬體檢測與驗證工具
 │   ├── camera_check.py                  # 自動掃描可用相機編號並開啟即時預覽
-│   └── go_home.py
+│   ├── go_home.py                       # 平滑移動 SO-101 回到 Home 姿態
+│   └── verify_checkpoints.py            # SmolVLA 多模型 Checkpoint 預檢與切換延遲 Benchmark
 ├── datasets/                            # LeRobot v3.0 資料集
 │   ├── so101_pick_cube/                 # 相機：wrist, side_45 | task: "Pick up the cube"
-│   └── so101_pick_teabag/               # 相機：wrist, side_45 | task: "Pick up the teabag"
+│   ├── so101_pick_teabag/               # 相機：wrist, side_45 | task: "Pick up the teabag"
+│   ├── so101_put_into_cup/              # 放入杯中任務資料集
+│   └── so101_shake_cup/                 # 搖晃杯子任務資料集
 └── outputs/                             # 訓練輸出目錄（outputs/<arch>/<dataset_name>/checkpoints）
 ```
 
@@ -341,7 +351,65 @@ uv run python -u local/deploy_sequence.py \
     --offline \
     --return-home-between --wait-enter-between 
 ```
-### 常用實機微調參數
+### 7. 閉迴路 5 階段連續任務部署（YOLOE + SmolVLA：`local/deploy_continuous_task.py`）
+
+整合 [`SmolVLAPolicyPool`](local/smolvla_pool.py) 與 [`YOLOEPerceptionMonitor`](local/yolo_monitor.py)，自動執行完整 5 階段飲品調製流程，並支援視覺抓取確認、不透明杯放置驗證、中途掉落自動回退與超時回 Home 重試：
+1. **Stage 1**：`Pick Cube`（抓取方塊）
+2. **Stage 2**：`Put Cube into Cup`（將方塊放入杯中，若中途掉落自動回退至 Stage 1）
+3. **Stage 3**：`Pick Teabag`（抓取茶包）
+4. **Stage 4**：`Put Teabag into Cup`（將茶包放入杯中，若中途掉落自動回退至 Stage 3）
+5. **Stage 5**：`Shake Cup`（搖晃杯子）
+
+#### YOLOE 視覺提示設定（不需訓練資料集）
+本專案的 YOLOE 採用 **Visual Prompting（視覺提示）**，**不需要收集大量圖片跑訓練**，只要提供 **1 張參考樣本圖 + 框選 3 個目標物件（`tea bag`、`cube`、`cup`）**，程式啟動時就會自動編碼視覺特徵並進行即時偵測：
+
+1. **安裝依賴**（若尚未安裝 `ultralytics`；權重預設為 `yoloe-11l-seg.pt`，首次執行會自動下載）：
+   ```bash
+   uv add ultralytics
+   ```
+2. **建立樣本參考框**（二選一，會產生 `local/yoloe_ref.jpg` 與 `local/yoloe_prompt_config.json`）：
+   ```bash
+   # 方式 A（推薦）：使用 side_45 相機現場拍攝樣本
+   # 將 tea bag / cube / cup 擺好並移開手臂 -> 按 's' 擷取畫面 -> 依序拖曳框選 3 個物件並按 ENTER/SPACE 確認
+   uv run python -u local/yolo_monitor.py --calibrate-ref --cam-side-45 2
+
+   # 方式 B：使用現有樣本照片（建議視角與解析度接近 side_45 相機）
+   uv run python -u local/yolo_monitor.py --calibrate-ref --image <樣本圖片路徑>
+   ```
+3. **驗證偵測效果**（按 `b` 可更新基準框，按 `q` 離開；若有漏抓可調低 `--yolo-conf`，預設 `0.25`）：
+   ```bash
+   uv run python -u local/yolo_monitor.py --display --cam-side-45 2
+   ```
+   > 若未來改用自行 Fine-tune 的標準 YOLO 權重（`.pt`），可在 `deploy_continuous_task.py` 加上 `--yolo-mode standard --yolo-weights <best.pt>`。
+
+#### 執行 5 階段連續部署與驗證
+
+```bash
+# 1. 預檢 4 個 SmolVLA Checkpoint 完整性並量測 5 階段切換延遲
+uv run python -u tools/verify_checkpoints.py --benchmark
+# （若僅想在無 checkpoint 機器上驗證流程，可改用 --mock）
+uv run python -u tools/verify_checkpoints.py --mock
+
+# 2. 離線模擬測試完整狀態機（不需連接手臂或模型權重，並模擬超時與掉落恢復）
+uv run python -u local/deploy_continuous_task.py --dry-run --mock-models --simulate-failures
+
+# 3. 實機閉迴路 5 階段連續部署
+uv run python -u local/deploy_continuous_task.py \
+    --port /dev/ttyACM0 \
+    --robot-id my_follower \
+    --cam-wrist 0 \
+    --cam-side-45 2 \
+    --preload-mode auto \
+    --display \
+    --offline
+```
+> - `--preload-mode auto` 會在 VRAM `>= 8 GB`（如 RTX 3060 12GB）時自動選用 `gpu_full` 零拷貝切換；低 VRAM 裝置可選 `gpu_experts` 或 `cpu_pinned`。
+> - 啟用 `--display` 時，HUD 視窗支援熱鍵操作：按 `n` 跳至下一階段、`r` 重設當前階段、`q` 結束部署。
+
+---
+
+### 常用實機微調與輔助工具
+- **歸位工具**：`uv run python -u tools/go_home.py --port /dev/ttyACM0 --robot-id my_follower` 可平滑將手臂移動回 Home 姿態。
 - `--action-ema 0.5`（範圍 `(0, 1]`）：對連續動作進行指數移動平均平滑，可減少機械臂抖動。
 - `--max-relative-target 5.0`：限制單步關節角度最大變化量，提升實機安全性。
 - `--display`：於部署時顯示即時雙相機預覽視窗（按 `q` 停止）。
