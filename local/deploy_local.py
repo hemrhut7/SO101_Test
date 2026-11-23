@@ -352,6 +352,18 @@ def run_dry_run(args, runner, device):
     print(f"[Dry-Run Done] avg latency: {avg_ms:.2f} ms ({1000.0 / max(avg_ms, 1e-6):.1f} Hz)")
 
 
+def _release_gripper_if_closed(robot, open_delta_raw=300):
+    """Open the SO-101 gripper slightly before homing during a restart."""
+    try:
+        pos = robot.bus.sync_read("Present_Position", normalize=False)
+        if "gripper" in pos:
+            pos["gripper"] = min(4095, int(pos["gripper"]) + open_delta_raw)
+            robot.bus.sync_write("Goal_Position", pos, normalize=False)
+            time.sleep(0.25)
+    except Exception:
+        pass
+
+
 def return_to_home(robot, target_pos=None, duration=2.0, steps=60):
     """Smoothly move the SO-101 arm back to target_pos (or raw 2048 if None)."""
     start_pos = robot.bus.sync_read("Present_Position", normalize=False)
@@ -530,16 +542,17 @@ def run_live_robot(args, runner, device):
                                     title = f"SO-101 {runner.arch.upper()} ({' | '.join(cameras.keys())})"
                                     cv2.imshow(title, bgr)
                                     key = cv2.waitKey(1) & 0xFF
-                                    if key == ord("q"):
+                                    if key in (ord("q"), ord("Q")):
                                         print("Stopped by user ('q').")
                                         stop_requested = True
                                         break
-                                    if key == ord("r"):
-                                        print(f"\n[Restart] 'r' pressed at step {step}. Returning to initial pose and restarting task...")
+                                    if key in (ord("r"), ord("R")):
+                                        print(f"\n[Restart] 'r' pressed at step {step}. Opening gripper, returning to initial pose, and restarting task...")
+                                        _release_gripper_if_closed(robot)
                                         return_to_home(robot, target_pos=initial_pos, duration=max(0.0, args.home_duration))
                                         restart_requested = True
                                         break
-                                    if key == ord("n") and len(stages) > 1:
+                                    if key in (ord("n"), ord("N")) and len(stages) > 1:
                                         print(f"Advancing to next stage ('n' pressed at step {step}).")
                                         break
                             except cv2.error as e:
@@ -569,7 +582,8 @@ def run_live_robot(args, runner, device):
         if getattr(robot, "is_connected", True):
             if not args.no_go_home:
                 try:
-                    print("Returning SO-101 to initial pose...")
+                    print("Opening gripper and returning SO-101 to initial pose...")
+                    _release_gripper_if_closed(robot)
                     return_to_home(robot, target_pos=initial_pos, duration=max(0.0, args.home_duration))
                 except Exception as home_err:
                     print(f"Warning: failed to return to initial pose before disconnect ({home_err})")

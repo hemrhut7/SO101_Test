@@ -1,10 +1,10 @@
 """Closed-loop 5-stage continuous SO-101 deployment (YOLOE + SmolVLA).
 
 Executes the full automated beverage preparation sequence:
-    1. Pick up the cube
-    2. Put the cube into the opaque cup
-    3. Pick up the teabag
-    4. Put the teabag into the opaque cup
+    1. Pick up the teabag
+    2. Put the teabag into the opaque cup
+    3. Pick up the cube
+    4. Put the cube into the opaque cup
     5. Shake the cup
 
 Features:
@@ -65,31 +65,7 @@ def build_five_stage_pipeline(args: argparse.Namespace) -> list[TaskStageSpec]:
     return [
         TaskStageSpec(
             index=0,
-            name="Stage 1: Pick Cube",
-            policy_key="pick_cube",
-            task_prompt=args.task_pick_cube,
-            mode="pick",
-            target_object="cube",
-            timeout_s=args.pick_timeout,
-            min_steps=args.min_pick_steps,
-            return_home_after=False,  # Keep holding cube in mid-air for put_into_cup!
-            rollback_stage_idx=None,
-        ),
-        TaskStageSpec(
-            index=1,
-            name="Stage 2: Put Cube into Cup",
-            policy_key="put_cup",
-            task_prompt=args.task_put_cup,
-            mode="put",
-            target_object="cube",
-            timeout_s=args.put_timeout,
-            min_steps=args.min_put_steps,
-            return_home_after=True,  # Return empty arm to Home before picking teabag
-            rollback_stage_idx=0,     # If cube drops mid-flight, rollback to Stage 1
-        ),
-        TaskStageSpec(
-            index=2,
-            name="Stage 3: Pick Teabag",
+            name="Stage 1: Pick Teabag",
             policy_key="pick_teabag",
             task_prompt=args.task_pick_teabag,
             mode="pick",
@@ -100,16 +76,40 @@ def build_five_stage_pipeline(args: argparse.Namespace) -> list[TaskStageSpec]:
             rollback_stage_idx=None,
         ),
         TaskStageSpec(
-            index=3,
-            name="Stage 4: Put Teabag into Cup",
+            index=1,
+            name="Stage 2: Put Teabag into Cup",
             policy_key="put_cup",
             task_prompt=args.task_put_cup,
             mode="put",
             target_object="tea bag",
             timeout_s=args.put_timeout,
             min_steps=args.min_put_steps,
+            return_home_after=True,  # Return empty arm to Home before picking cube
+            rollback_stage_idx=0,     # If teabag drops mid-flight, rollback to Stage 1
+        ),
+        TaskStageSpec(
+            index=2,
+            name="Stage 3: Pick Cube",
+            policy_key="pick_cube",
+            task_prompt=args.task_pick_cube,
+            mode="pick",
+            target_object="cube",
+            timeout_s=args.pick_timeout,
+            min_steps=args.min_pick_steps,
+            return_home_after=False,  # Keep holding cube in mid-air for put_into_cup!
+            rollback_stage_idx=None,
+        ),
+        TaskStageSpec(
+            index=3,
+            name="Stage 4: Put Cube into Cup",
+            policy_key="put_cup",
+            task_prompt=args.task_put_cup,
+            mode="put",
+            target_object="cube",
+            timeout_s=args.put_timeout,
+            min_steps=args.min_put_steps,
             return_home_after=True,  # Return empty arm to Home before shaking cup
-            rollback_stage_idx=2,     # If teabag drops mid-flight, rollback to Stage 3
+            rollback_stage_idx=2,     # If cube drops mid-flight, rollback to Stage 3
         ),
         TaskStageSpec(
             index=4,
@@ -178,9 +178,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pick-timeout", type=float, default=25.0, help="Timeout (seconds) for pick stages before auto-reset.")
     parser.add_argument("--put-timeout", type=float, default=25.0, help="Timeout (seconds) for put stages before auto-reset.")
     parser.add_argument("--shake-duration", type=float, default=15.0, help="Duration (seconds) for shake the cup stage.")
-    parser.add_argument("--min-pick-steps", type=int, default=90, help="Minimum steps before grasp verification triggers.")
+    parser.add_argument("--min-pick-steps", type=int, default=300, help="Minimum steps before grasp verification triggers.")
     parser.add_argument("--min-put-steps", type=int, default=60, help="Minimum steps before cup release verification triggers.")
-    parser.add_argument("--grasp-stable-checks", type=int, default=5, help="Consecutive YOLO checks to confirm grasp.")
+    parser.add_argument("--grasp-stable-checks", type=int, default=30, help="Consecutive YOLO checks to confirm grasp.")
     parser.add_argument("--put-stable-checks", type=int, default=8, help="Consecutive YOLO checks to confirm opaque-cup placement.")
     parser.add_argument("--lift-px", type=float, default=40.0, help="Upward pixel shift on side_45 to confirm lifted grasp.")
     parser.add_argument("--gripper-open-thresh", type=float, default=28.0, help="Gripper joint degree threshold indicating open jaw.")
@@ -633,7 +633,7 @@ def main() -> None:
 
     if not args.mock_models:
         print("Warming up SmolVLA policies on target device...")
-        pool.warmup(task_text=args.task_pick_cube)
+        pool.warmup(task_text=args.task_pick_teabag)
         vram = pool.get_vram_mb()
         if vram["allocated_mb"] > 0:
             print(f"GPU VRAM after preload+warmup: allocated={vram['allocated_mb']:.1f} MB, peak={vram['peak_mb']:.1f} MB")
