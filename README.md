@@ -17,13 +17,19 @@
 
 ## Overview
 
-This repository provides a unified training and deployment pipeline for the **SO-101** dual-camera (`wrist` + `side_45`) follower arm, supporting **SmolVLA**, **ACT**, **CNN**, and **FC (MLP)** policies. Local dependencies are managed with **`uv`** and pinned to **`lerobot==0.7.0`** (Python 3.12) to stay 100% consistent with the Google Colab training notebooks.
+This repository is the final project implementation for NYCU's **ICT Micro-Credit Course — *Physical AI: Introduction to Robot Policy Training (MuJoCo × PyTorch on ROCm)***. It implements a closed-loop **YOLOE + SmolVLA** pipeline on a dual-camera (`wrist` + `side_45`) **SO-101** robot arm to autonomously perform a multi-stage beverage preparation task.
+
+- **Core Architecture**: **SmolVLA** serves as the primary action-generation policy in the continuous pipeline, paired with **YOLOE** for high-level visual state monitoring.
+- **Baseline Experiments Only**: **ACT**, **CNN**, and **FC (MLP)** scripts are included solely for simple standalone testing and comparison, and are not used in the final project architecture.
 
 ### Key Highlights
-- **Reproducible Environments**: `.python-version`, `pyproject.toml`, and `uv.lock` lock exact package versions across training and deployment machines.
-- **Unified Multi-Policy Tooling**: Single CLI workflow for training, offline dry-run verification, and live robot inference across SmolVLA, ACT, CNN, and FC (MLP).
-- **Zero-Latency Policy Switching**: `SmolVLAPolicyPool` preloads all unique models in VRAM on RTX 3060 (12GB) / AMD Ryzen AI Max+ 395 (`gpu_full`, `< 0.05 ms` pointer switch), with `gpu_experts` and `cpu_pinned` fallbacks for lower-VRAM GPUs.
-- **Closed-Loop Vision & Recovery**: In-process `YOLOE` visual-prompt monitoring verifies grasp lift, opaque-cup placement, mid-flight drops, and executes an automated recovery sequence (*open gripper to drop held object $\to$ return Home $\to$ re-scan baseline*).
+- **Closed-Loop Vision & Recovery**: In-process `YOLOE` visual-prompt monitoring verifies grasp lift, opaque-cup placement, and mid-flight drops, executing an automated recovery sequence (*open gripper to drop held object $\to$ return Home $\to$ re-scan baseline*) on timeout or failure.
+- **SmolVLA Training via Imitation Learning (Teleoperation)**:
+  - **Leader-Follower Setup**: Expert demonstrations are recorded via teleoperation, where a human operator manipulates the SO-101 **leader arm** and the **follower arm** mirrors its joint motions while capturing dual-camera observations and joint states.
+  - **Dataset Scale**: **60 episodes** are collected by teleoperation for each sub-task; if model performance is not satisfactory, an additional **20 episodes** are collected for further fine-tuning.
+  - **Camera-Aware 3D Trajectories**: Expert demonstrations must be clean and rational for a robot perceiving the 3D world through only two cameras (`wrist` and `side_45`). How the arm moves in 3D space directly affects the model's ability to perceive arm pose and depth.
+  - **No Hesitation During Recording**: Avoid pausing or hesitating during teleoperation—practicing the task beforehand as a human operator is critical for collecting high-quality expert data.
+  - **Multi-Object Distractor Scenes**: Make sure to collect demonstrations with multiple objects present on the table. If only a single target object is placed on the table during recording, the trained model can be easily interfered with or distracted by nearby non-target objects during deployment.
 
 ---
 
