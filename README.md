@@ -25,7 +25,7 @@ This repository is the final project implementation for NYCU's **ICT Micro-Credi
 
 ---
 
-## 🎬 Live Demos
+## Demos
 
 | Full 5-Stage Autonomous Task | Dynamic YOLOE + SmolVLA Hot-Swap Switching |
 | :---: | :---: |
