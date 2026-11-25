@@ -5,8 +5,8 @@ description = "SO-101 robot arm training and deployment with SmolVLA, ACT, CNN, 
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "lerobot[smolvla,dataset,feetech]==0.7.0",
-    "torch",
-    "torchvision",
+    "torch[device-gfx1151]==2.15.0+rocm10.2.0",
+    "torchvision[device-gfx1151]==0.29.2+rocm10.2.0",
     "numpy",
     "pandas",
     "matplotlib",
@@ -18,3 +18,15 @@ dependencies = [
 
 [tool.uv]
 exclude-dependencies = ["opencv-python-headless"]
+index-strategy = "unsafe-best-match"
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[tool.uv.sources]
+torch = { index = "amd-rocm-whl-next" }
+torchvision = { index = "amd-rocm-whl-next" }
+
+[[tool.uv.index]]
+name = "amd-rocm-whl-next"
+url = "https://stable.repo.amd.com/rocm/whl-next/"

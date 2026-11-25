@@ -357,3 +357,54 @@ uv run python -u local/deploy_continuous_task.py \
 - `--action-ema 0.5`（範圍 `(0, 1]`）：對連續動作進行指數移動平均平滑，可減少機械臂抖動。
 - `--max-relative-target 5.0`：限制單步關節角度最大變化量，提升實機安全性。
 - `--display`：於部署時顯示即時雙相機預覽視窗（`deploy_local.py` 中按 `r` 會先張開夾爪再回 Home 重試，按 `q` 停止）。
+
+---
+
+## 8. AMD AI PC 395+（Ryzen AI Max+ 395 / `gfx1151`）部署指南
+
+若要將本專案部署至 **AMD AI PC 395+（Radeon 8060S / `gfx1151`）**，建議使用專屬部署分支 `deploy/amd-395-rocm`（已將 [`pyproject.toml`](pyproject.toml) 切換至支援 `gfx1151` 的 AMD ROCm `whl-next` 套件源，同時支援 Ubuntu Linux 與 Windows 11）。
+
+### 8.1 環境建置流程
+`deploy/amd-395-rocm` 分支已於 [`pyproject.toml`](pyproject.toml) 與 `uv.lock` 完成 **Ubuntu Linux (`x86_64`)** 的 ROCm 10.2 依賴鎖定（設定 `index-strategy = "unsafe-best-match"` 並加入 `[device-gfx1151]` extra）：
+
+```bash
+# 1. 切換至 AMD 專屬部署分支
+git checkout deploy/amd-395-rocm
+
+# 2. 直接建立並同步 ROCm 10.2 版 PyTorch 虛擬環境（Ubuntu 24.04+）
+uv sync
+```
+
+> **若部署目標為 Windows 11**：因 AMD `whl-next` 索引中 `torch==2.15.0+rocm10.2.0` 的跨平台中繼資料未對 `triton` 標記僅限 Linux，請於 [`pyproject.toml`](pyproject.toml) 的 `[tool.uv]` 調整為：
+> ```toml
+> exclude-dependencies = ["opencv-python-headless", "triton"]
+> environments = ["sys_platform == 'win32' and platform_machine == 'AMD64'"]
+> ```
+> 再執行 `uv lock --upgrade-package torch --upgrade-package torchvision && uv sync`。
+
+### 8.2 系統層與執行注意事項
+1. **BIOS UMA Frame Buffer（VRAM）需手動調大**：
+   - [`local/smolvla_pool.py`](local/smolvla_pool.py) 會依據 `torch.cuda.get_device_properties(0).total_memory` 判斷是否進入 `gpu_full` 模式（門檻 `>= 8.0 GB`）。
+   - 部分 OEM BIOS 預設 `Auto` 僅會分配小容量專屬 UMA，建議在 BIOS 手動固定設為 **16GB 或 32GB+**，以利 4 個 SmolVLA 與 YOLOE 模型同時常駐 GPU。
+2. **作業系統與硬體週邊差異**：
+   - **推薦 Ubuntu 24.04+**：與本指南的 `/dev/ttyACM0` 序列埠、V4L2 相機（`tools/camera_check.py`）及 Linux `triton` 支援最一致。需先安裝對應 `amdgpu`/ROCm 驅動，並將使用者加入權限群組：
+     ```bash
+     sudo usermod -a -G render,video,dialout $LOGNAME
+     ```
+     （設定後需重新登入生效。）
+   - **Windows 11**：需安裝支援 Strix Halo ROCm 的 AMD Radeon 驅動；序列埠改用 `COMx`（如 `COM3`），相機請先以 `uv run python tools/camera_check.py` 重新掃描編號；Windows 版不含 `triton`，請勿啟用依賴 Triton 的 `torch.compile`。
+3. **環境變數與影片解碼**：
+   - 使用原生支援 `gfx1151` 的 ROCm wheel 時，**請勿設定**舊版 `HSA_OVERRIDE_GFX_VERSION=11.0.0`。
+   - [`local/train_local.py`](local/train_local.py) 與 [`local/deploy_local.py`](local/deploy_local.py) 已預設 `--video-backend pyav`，可避開 PyPI 版 `torchcodec` 的 ABI 風險（若實機仍遇到 `torchcodec` 載入衝突，可將 `"torchcodec"` 加入 `pyproject.toml` 的 `exclude-dependencies`）。
+
+### 8.3 部署後驗證指令
+```bash
+# 1. 確認 PyTorch ROCm/HIP 與 Radeon 8060S (gfx1151) 裝置辨識正常
+uv run python -c "import torch; print(torch.__version__, 'avail:', torch.cuda.is_available(), 'hip:', torch.version.hip, 'name:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)"
+
+# 2. 驗證 4 個 SmolVLA Checkpoint 完整性與 GPU 熱切換延遲
+uv run python -u tools/verify_checkpoints.py --benchmark
+
+# 3. 離線模擬 5 階段閉迴路狀態機與異常恢復
+uv run python -u local/deploy_continuous_task.py --dry-run --mock-models --simulate-failures
+```
