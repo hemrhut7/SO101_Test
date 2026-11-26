@@ -9,7 +9,7 @@
 [![uv](https://img.shields.io/badge/Package%20Manager-uv-DE5FE9?logo=uv&logoColor=white)](https://docs.astral.sh/uv/)
 [![Policies](https://img.shields.io/badge/Policies-SmolVLA%20%7C%20YOLOE-blue)](local/)
 
-[Usage Guide (`USAGE.md`)](USAGE.md) • [Live Demos](#-live-demos) • [Architecture](#architecture--key-features) • [Dataset & Lessons Learned](#teleoperation-dataset--lessons-learned) • [Quick Start](#quick-start) • [Project Structure](#project-structure)
+[Usage Guide (`USAGE.md`)](USAGE.md) • [Live Demos](#demos) • [Architecture](#architecture--key-features) • [Dataset & Lessons Learned](#teleoperation-dataset--lessons-learned) • [Future Work](#future-work--planned-improvements) • [Quick Start](#quick-start) • [Project Structure](#project-structure)
 
 </div>
 
@@ -129,6 +129,19 @@ All expert demonstrations were collected via **6-DOF Leader-Follower teleoperati
   <br />
   <sub><em>Moving-average training loss (window=200) across the four SmolVLA sub-task policies, including the 25k→35k fine-tuning stage for <code>so101_pick_teabag</code></em></sub>
 </div>
+
+---
+
+## Future Work & Planned Improvements
+
+1. **Multi-Object Scene Training**:
+   Include multiple objects and distractors on the tabletop throughout teleoperation data collection so `SmolVLA` learns to ground language instructions and distinguish the target object among alternatives—preventing the policy from simply overfitting to *"pick up the only object in the frame."*
+2. **Domain Standardization**:
+   Standardize visual and environmental conditions (e.g., lighting, camera placement, background, and tabletop appearance) across data collection and deployment sessions to minimize domain shift and improve policy robustness.
+3. **YOLO-Augmented Policy Inputs**:
+   Currently, both training and inference rely purely on raw video frames. Future iterations can incorporate `YOLO`/`YOLOE` detection outputs to enrich the policy's input representation—for example:
+   - Computing the **pixel distance** between the target object's center and the robot gripper as an auxiliary state input.
+   - Passing **bounding-box-annotated frames** as visual input so the policy can localize and grasp the intended object more accurately in cluttered, multi-object environments.
 
 ---
 
