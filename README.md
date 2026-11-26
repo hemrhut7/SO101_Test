@@ -114,6 +114,22 @@ All expert demonstrations were collected via **6-DOF Leader-Follower teleoperati
 
 </details>
 
+### SmolVLA Training Loss Curves
+
+<div align="center">
+  <img src="assets/so101_loss_curves_grid.png" alt="SmolVLA Training Loss Time-Series Grid" width="760" />
+  <br />
+  <sub><em>Per-task raw loss and moving-average (window=200) time-series curves for each SmolVLA policy</em></sub>
+</div>
+
+<br />
+
+<div align="center">
+  <img src="assets/so101_loss_curves_comparison.png" alt="SmolVLA Training Loss Comparison" width="760" />
+  <br />
+  <sub><em>Moving-average training loss (window=200) across the four SmolVLA sub-task policies, including the 25k→35k fine-tuning stage for <code>so101_pick_teabag</code></em></sub>
+</div>
+
 ---
 
 ## Quick Start
@@ -174,7 +190,9 @@ SO101_Test/
 │   ├── dataset_pick_teabag.gif          # Dual-camera dataset preview (Pick Teabag)
 │   ├── dataset_put_into_cup.gif         # Dual-camera dataset preview (Put into Cup)
 │   ├── dataset_pick_cube.gif            # Dual-camera dataset preview (Pick Cube)
-│   └── dataset_shake_cup.gif            # Dual-camera dataset preview (Shake Cup)
+│   ├── dataset_shake_cup.gif            # Dual-camera dataset preview (Shake Cup)
+│   ├── so101_loss_curves_grid.png       # Per-task SmolVLA raw & MA(200) loss grid
+│   └── so101_loss_curves_comparison.png # SmolVLA training loss comparison plot
 ├── colab/                               # Google Colab GPU training notebooks (lerobot==0.7.0)
 │   ├── smolVLA_train.ipynb              # Baseline example (so101_pick_stylus)
 │   ├── smolVLA_train_pick_cube.ipynb    # SmolVLA fine-tuning (so101_pick_cube)
