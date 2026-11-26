@@ -17,7 +17,7 @@
 
 ## Overview
 
-This repository is the final project implementation for NYCU's **ICT Micro-Credit Course — *Physical AI: Introduction to Robot Policy Training*** (Group 123: 張韶華, 楊鈞喻, 黃南榮). It implements a **5-stage closed-loop YOLOE + SmolVLA** pipeline on a dual-camera (`wrist` + `side_45`) 6-DOF **SO-101** robot arm to autonomously perform a multi-stage beverage preparation task—picking a teabag into a cup, picking a cube (simulating an ice cube) into the cup, and shaking the cup to mix.
+This repository is the final project implementation for NYCU's **ICT Micro-Credit Course — *Physical AI: Introduction to Robot Policy Training***. It implements a **5-stage closed-loop YOLOE + SmolVLA** pipeline on a dual-camera (`wrist` + `side_45`) 6-DOF **SO-101** robot arm to autonomously perform a multi-stage beverage preparation task—picking a teabag into a cup, picking a cube (simulating an ice cube) into the cup, and shaking the cup to mix.
 
 - **Core Architecture**: **4 specialized SmolVLA policies** execute **5 continuous stages** (reusing the `put_into_cup` policy for both teabag and cube placement), paired with **YOLOE** for dataset-free visual-prompt state monitoring and automated failure recovery.
 - **Real-World Demo**: Completes the full 5-stage autonomous pick, place-into-opaque-cup, and shake sequence with zero human intervention, seamless GPU-pooled model switching, and manual-restart-free error recovery..
